@@ -187,6 +187,39 @@ describe("telegramPlugin groups", () => {
   });
 });
 
+describe("telegramPlugin messaging", () => {
+  it("owns topic session parsing and parent fallback candidates", () => {
+    expect(
+      telegramPlugin.messaging?.resolveSessionConversation?.({
+        kind: "group",
+        rawId: "-1001:topic:77",
+      }),
+    ).toEqual({
+      id: "-1001",
+      threadId: "77",
+      baseConversationId: "-1001",
+      parentConversationCandidates: ["-1001"],
+    });
+    expect(
+      telegramPlugin.messaging?.resolveSessionConversation?.({
+        kind: "group",
+        rawId: "-1001:Topic:77",
+      }),
+    ).toEqual({
+      id: "-1001",
+      threadId: "77",
+      baseConversationId: "-1001",
+      parentConversationCandidates: ["-1001"],
+    });
+    expect(
+      telegramPlugin.messaging?.resolveSessionConversation?.({
+        kind: "group",
+        rawId: "-1001",
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("telegramPlugin duplicate token guard", () => {
   it("marks secondary account as not configured when token is shared", async () => {
     const cfg = createCfg();
@@ -292,7 +325,7 @@ describe("telegramPlugin duplicate token guard", () => {
     }
   });
 
-  it("uses imported Telegram probe helpers even when runtime state is set", async () => {
+  it("prefers runtime Telegram probe helpers when runtime state is set", async () => {
     probeTelegramMock.mockReset();
     const runtimeProbeTelegram = vi.fn(async () => ({
       ok: true,
@@ -319,16 +352,16 @@ describe("telegramPlugin duplicate token guard", () => {
       }),
     ).resolves.toEqual({
       ok: true,
-      bot: { username: "modulebot" },
-      elapsedMs: 1,
+      bot: { username: "runtimebot" },
+      elapsedMs: 7,
     });
-    expect(probeTelegramMock).toHaveBeenCalledWith("token-ops", 4321, {
+    expect(runtimeProbeTelegram).toHaveBeenCalledWith("token-ops", 4321, {
       accountId: "ops",
       proxyUrl: undefined,
       network: undefined,
       apiRoot: undefined,
     });
-    expect(runtimeProbeTelegram).not.toHaveBeenCalled();
+    expect(probeTelegramMock).not.toHaveBeenCalled();
   });
 
   it("passes account proxy and network settings into Telegram probes", async () => {

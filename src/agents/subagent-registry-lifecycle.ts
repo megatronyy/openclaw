@@ -1,7 +1,11 @@
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { defaultRuntime } from "../runtime.js";
 import { emitSessionLifecycleEvent } from "../sessions/session-lifecycle-events.js";
-import { updateTaskDeliveryByRunId, updateTaskStateByRunId } from "../tasks/task-registry.js";
+import {
+  completeTaskRunByRunId,
+  failTaskRunByRunId,
+  setDetachedTaskDeliveryStatusByRunId,
+} from "../tasks/task-executor.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.js";
 import {
   captureSubagentCompletionReply,
@@ -154,8 +158,10 @@ export function createSubagentRegistryLifecycleController(params: {
     entry: SubagentRunRecord;
     reason: "retry-limit" | "expiry";
   }) => {
-    updateTaskDeliveryByRunId({
+    setDetachedTaskDeliveryStatusByRunId({
       runId: giveUpParams.runId,
+      runtime: "subagent",
+      sessionKey: giveUpParams.entry.childSessionKey,
       deliveryStatus: "failed",
     });
     giveUpParams.entry.wakeOnDescendantSettle = undefined;
@@ -270,8 +276,10 @@ export function createSubagentRegistryLifecycleController(params: {
       return;
     }
     if (didAnnounce) {
-      updateTaskDeliveryByRunId({
+      setDetachedTaskDeliveryStatusByRunId({
         runId,
+        runtime: "subagent",
+        sessionKey: entry.childSessionKey,
         deliveryStatus: "delivered",
       });
       entry.wakeOnDescendantSettle = undefined;
@@ -326,8 +334,10 @@ export function createSubagentRegistryLifecycleController(params: {
     }
 
     if (deferredDecision.kind === "give-up") {
-      updateTaskDeliveryByRunId({
+      setDetachedTaskDeliveryStatusByRunId({
         runId,
+        runtime: "subagent",
+        sessionKey: entry.childSessionKey,
         deliveryStatus: "failed",
       });
       entry.wakeOnDescendantSettle = undefined;
@@ -377,26 +387,27 @@ export function createSubagentRegistryLifecycleController(params: {
       });
     };
 
-    void params.runSubagentAnnounceFlow({
-      childSessionKey: entry.childSessionKey,
-      childRunId: entry.runId,
-      requesterSessionKey: entry.requesterSessionKey,
-      requesterOrigin,
-      requesterDisplayKey: entry.requesterDisplayKey,
-      task: entry.task,
-      timeoutMs: params.subagentAnnounceTimeoutMs,
-      cleanup: entry.cleanup,
-      roundOneReply: entry.frozenResultText ?? undefined,
-      fallbackReply: entry.fallbackFrozenResultText ?? undefined,
-      waitForCompletion: false,
-      startedAt: entry.startedAt,
-      endedAt: entry.endedAt,
-      label: entry.label,
-      outcome: entry.outcome,
-      spawnMode: entry.spawnMode,
-      expectsCompletionMessage: entry.expectsCompletionMessage,
-      wakeOnDescendantSettle: entry.wakeOnDescendantSettle === true,
-    })
+    void params
+      .runSubagentAnnounceFlow({
+        childSessionKey: entry.childSessionKey,
+        childRunId: entry.runId,
+        requesterSessionKey: entry.requesterSessionKey,
+        requesterOrigin,
+        requesterDisplayKey: entry.requesterDisplayKey,
+        task: entry.task,
+        timeoutMs: params.subagentAnnounceTimeoutMs,
+        cleanup: entry.cleanup,
+        roundOneReply: entry.frozenResultText ?? undefined,
+        fallbackReply: entry.fallbackFrozenResultText ?? undefined,
+        waitForCompletion: false,
+        startedAt: entry.startedAt,
+        endedAt: entry.endedAt,
+        label: entry.label,
+        outcome: entry.outcome,
+        spawnMode: entry.spawnMode,
+        expectsCompletionMessage: entry.expectsCompletionMessage,
+        wakeOnDescendantSettle: entry.wakeOnDescendantSettle === true,
+      })
       .then((didAnnounce) => {
         finalizeAnnounceCleanup(didAnnounce);
       })
@@ -458,21 +469,29 @@ export function createSubagentRegistryLifecycleController(params: {
     if (mutated) {
       params.persist();
     }
-    updateTaskStateByRunId({
-      runId: entry.runId,
-      status:
-        completeParams.outcome.status === "ok"
-          ? "succeeded"
-          : completeParams.outcome.status === "timeout"
-            ? "timed_out"
-            : "failed",
-      startedAt: entry.startedAt,
-      endedAt: entry.endedAt,
-      lastEventAt: entry.endedAt ?? Date.now(),
-      error: completeParams.outcome.status === "error" ? completeParams.outcome.error : undefined,
-      progressSummary: entry.frozenResultText ?? undefined,
-      terminalSummary: null,
-    });
+    if (completeParams.outcome.status === "ok") {
+      completeTaskRunByRunId({
+        runId: entry.runId,
+        runtime: "subagent",
+        sessionKey: entry.childSessionKey,
+        endedAt: entry.endedAt,
+        lastEventAt: entry.endedAt ?? Date.now(),
+        progressSummary: entry.frozenResultText ?? undefined,
+        terminalSummary: null,
+      });
+    } else {
+      failTaskRunByRunId({
+        runId: entry.runId,
+        runtime: "subagent",
+        sessionKey: entry.childSessionKey,
+        status: completeParams.outcome.status === "timeout" ? "timed_out" : "failed",
+        endedAt: entry.endedAt,
+        lastEventAt: entry.endedAt ?? Date.now(),
+        error: completeParams.outcome.status === "error" ? completeParams.outcome.error : undefined,
+        progressSummary: entry.frozenResultText ?? undefined,
+        terminalSummary: null,
+      });
+    }
 
     try {
       await persistSubagentSessionTiming(entry);
