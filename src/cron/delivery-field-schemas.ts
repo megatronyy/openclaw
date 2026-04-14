@@ -1,9 +1,10 @@
 import { z, type ZodType } from "zod";
+import { normalizeOptionalLowercaseString } from "../shared/string-coerce.js";
 
 const trimStringPreprocess = (value: unknown) => (typeof value === "string" ? value.trim() : value);
 
 const trimLowercaseStringPreprocess = (value: unknown) =>
-  typeof value === "string" ? value.trim().toLowerCase() : value;
+  normalizeOptionalLowercaseString(value) ?? value;
 
 export const DeliveryModeFieldSchema = z
   .preprocess(trimLowercaseStringPreprocess, z.enum(["deliver", "announce", "none", "webhook"]))
@@ -24,14 +25,10 @@ export const DeliveryThreadIdFieldSchema = z.union([
   z.number().finite(),
 ]);
 
-export const LegacyDeliveryThreadIdFieldSchema = DeliveryThreadIdFieldSchema.transform((value) =>
-  String(value),
-);
-
 export const TimeoutSecondsFieldSchema = z
   .number()
   .finite()
-  .transform((value) => Math.max(0, Math.floor(value)));
+  .transform((value) => Math.max(0, value));
 
 export type ParsedDeliveryInput = {
   mode?: "announce" | "none" | "webhook";
@@ -48,28 +45,6 @@ export function parseDeliveryInput(input: Record<string, unknown>): ParsedDelive
     to: parseOptionalField(TrimmedNonEmptyStringFieldSchema, input.to),
     threadId: parseOptionalField(DeliveryThreadIdFieldSchema, input.threadId),
     accountId: parseOptionalField(TrimmedNonEmptyStringFieldSchema, input.accountId),
-  };
-}
-
-export type ParsedLegacyDeliveryHints = {
-  deliver?: boolean;
-  bestEffortDeliver?: boolean;
-  channel?: string;
-  provider?: string;
-  to?: string;
-  threadId?: string;
-};
-
-export function parseLegacyDeliveryHintsInput(
-  payload: Record<string, unknown>,
-): ParsedLegacyDeliveryHints {
-  return {
-    deliver: parseOptionalField(z.boolean(), payload.deliver),
-    bestEffortDeliver: parseOptionalField(z.boolean(), payload.bestEffortDeliver),
-    channel: parseOptionalField(LowercaseNonEmptyStringFieldSchema, payload.channel),
-    provider: parseOptionalField(LowercaseNonEmptyStringFieldSchema, payload.provider),
-    to: parseOptionalField(TrimmedNonEmptyStringFieldSchema, payload.to),
-    threadId: parseOptionalField(LegacyDeliveryThreadIdFieldSchema, payload.threadId),
   };
 }
 
