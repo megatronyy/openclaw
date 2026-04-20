@@ -2,12 +2,13 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import semverGte from "semver/functions/gte.js";
-import semverValid from "semver/functions/valid.js";
 import { BUNDLED_RUNTIME_SIDECAR_PATHS } from "../plugins/runtime-sidecar-paths.js";
 import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import { pathExists } from "../utils.js";
-import { NPM_UPDATE_COMPAT_SIDECAR_PATHS } from "./npm-update-compat-sidecars.js";
+import {
+  NPM_UPDATE_COMPAT_SIDECAR_PATHS,
+  NPM_UPDATE_OMITTED_BUNDLED_PLUGIN_ROOTS,
+} from "./npm-update-compat-sidecars.js";
 import {
   collectPackageDistInventory,
   PACKAGE_DIST_INVENTORY_RELATIVE_PATH,
@@ -15,6 +16,7 @@ import {
 } from "./package-dist-inventory.js";
 import { readPackageVersion } from "./package-json.js";
 import { applyPathPrepend } from "./path-prepend.js";
+import { parseSemver } from "./runtime-guard.js";
 
 export type GlobalInstallManager = "npm" | "pnpm" | "bun";
 
@@ -43,7 +45,7 @@ const NPM_GLOBAL_INSTALL_OMIT_OPTIONAL_FLAGS = [
   "--omit=optional",
   ...NPM_GLOBAL_INSTALL_QUIET_FLAGS,
 ] as const;
-const FIRST_PACKAGED_DIST_INVENTORY_VERSION = "2026.4.15";
+const FIRST_PACKAGED_DIST_INVENTORY_VERSION = { major: 2026, minor: 4, patch: 15 };
 
 function normalizePackageTarget(value: string): string {
   return value.trim();
@@ -109,9 +111,17 @@ export async function collectInstalledGlobalPackageErrors(params: {
 }
 
 function shouldRequirePackagedDistInventory(version: string | null | undefined): boolean {
-  return typeof version === "string" && semverValid(version) !== null
-    ? semverGte(version, FIRST_PACKAGED_DIST_INVENTORY_VERSION)
-    : false;
+  const parsed = parseSemver(version ?? null);
+  if (!parsed) {
+    return false;
+  }
+  if (parsed.major !== FIRST_PACKAGED_DIST_INVENTORY_VERSION.major) {
+    return parsed.major > FIRST_PACKAGED_DIST_INVENTORY_VERSION.major;
+  }
+  if (parsed.minor !== FIRST_PACKAGED_DIST_INVENTORY_VERSION.minor) {
+    return parsed.minor > FIRST_PACKAGED_DIST_INVENTORY_VERSION.minor;
+  }
+  return parsed.patch >= FIRST_PACKAGED_DIST_INVENTORY_VERSION.patch;
 }
 
 async function collectInstalledPackageDistErrors(params: {
@@ -119,7 +129,7 @@ async function collectInstalledPackageDistErrors(params: {
   installedVersion: string | null;
   expectedVersion?: string | null;
 }): Promise<string[]> {
-  const criticalPaths = await collectLegacyInstalledPackageDistPaths(params.packageRoot);
+  const criticalPaths = await collectCriticalInstalledPackageDistPaths(params.packageRoot);
   let inventoryFiles: string[] | null = null;
   let inventoryError: string | null = null;
   try {
@@ -157,7 +167,7 @@ async function collectInstalledPackageDistErrors(params: {
 
   const criticalErrors = await collectInstalledPathErrors({
     packageRoot: params.packageRoot,
-    expectedFiles: criticalPaths,
+    expectedFiles: await collectLegacyInstalledPackageDistPaths(params.packageRoot),
     actualFiles: null,
     missingMessage: (relativePath) => `missing bundled runtime sidecar ${relativePath}`,
   });
@@ -178,10 +188,24 @@ async function collectInstalledPackageDistErrors(params: {
 
 async function collectLegacyInstalledPackageDistPaths(packageRoot: string): Promise<string[]> {
   const expectedFiles = new Set(NPM_UPDATE_COMPAT_SIDECAR_PATHS);
+  for (const relativePath of await collectCriticalInstalledPackageDistPaths(packageRoot)) {
+    expectedFiles.add(relativePath);
+  }
+  return [...expectedFiles].toSorted((left, right) => left.localeCompare(right));
+}
+
+async function collectCriticalInstalledPackageDistPaths(packageRoot: string): Promise<string[]> {
+  const expectedFiles = new Set<string>();
   await Promise.all(
     BUNDLED_RUNTIME_SIDECAR_PATHS.map(async (relativePath) => {
+      if (NPM_UPDATE_COMPAT_SIDECAR_PATHS.has(relativePath)) {
+        return;
+      }
       const pluginRoot = resolveBundledPluginRoot(relativePath);
       if (pluginRoot === null) {
+        return;
+      }
+      if (NPM_UPDATE_OMITTED_BUNDLED_PLUGIN_ROOTS.has(pluginRoot)) {
         return;
       }
       if (
