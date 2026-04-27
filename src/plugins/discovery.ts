@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { matchBoundaryFileOpenFailure, openBoundaryFileSync } from "../infra/boundary-file-read.js";
+import { openBoundaryFileSync } from "../infra/boundary-file-read.js";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
 import { resolveUserPath } from "../utils.js";
 import { detectBundleManifestFormat, loadBundleManifest } from "./bundle-manifest.js";
+import { resolvePackagedBundledLoadPathAlias } from "./bundled-load-path-aliases.js";
+import { listBundledSourceOverlayDirs } from "./bundled-source-overlays.js";
 import type { PluginBundleFormat, PluginDiagnostic, PluginFormat } from "./manifest-types.js";
 import {
   DEFAULT_PLUGIN_ENTRY_CANDIDATES,
@@ -17,6 +19,10 @@ import {
   type OpenClawPackageManifest,
   type PackageManifest,
 } from "./manifest.js";
+import {
+  resolvePackageRuntimeExtensionSources,
+  resolvePackageSetupSource,
+} from "./package-entry-resolution.js";
 import { formatPosixMode, isPathInside, safeRealpathSync, safeStatSync } from "./path-safety.js";
 import type { PluginOrigin } from "./plugin-origin.types.js";
 import { resolvePluginCacheInputs, resolvePluginSourceRoots } from "./roots.js";
@@ -552,65 +558,6 @@ function discoverBundleInRoot(params: {
   return "added";
 }
 
-function resolvePackageEntrySource(params: {
-  packageDir: string;
-  entryPath: string;
-  sourceLabel: string;
-  diagnostics: PluginDiagnostic[];
-  rejectHardlinks?: boolean;
-}): string | null {
-  const source = path.resolve(params.packageDir, params.entryPath);
-  const rejectHardlinks = params.rejectHardlinks ?? true;
-  const candidates = [source];
-  const openCandidate = (absolutePath: string): string | null => {
-    const opened = openBoundaryFileSync({
-      absolutePath,
-      rootPath: params.packageDir,
-      boundaryLabel: "plugin package directory",
-      rejectHardlinks,
-    });
-    if (!opened.ok) {
-      return matchBoundaryFileOpenFailure(opened, {
-        path: () => null,
-        io: () => {
-          params.diagnostics.push({
-            level: "warn",
-            message: `extension entry unreadable (I/O error): ${params.entryPath}`,
-            source: params.sourceLabel,
-          });
-          return null;
-        },
-        fallback: () => {
-          params.diagnostics.push({
-            level: "error",
-            message: `extension entry escapes package directory: ${params.entryPath}`,
-            source: params.sourceLabel,
-          });
-          return null;
-        },
-      });
-    }
-    const safeSource = opened.path;
-    fs.closeSync(opened.fd);
-    return safeSource;
-  };
-  if (!rejectHardlinks) {
-    const builtCandidate = source.replace(/\.[^.]+$/u, ".js");
-    if (builtCandidate !== source) {
-      candidates.push(builtCandidate);
-    }
-  }
-
-  for (const candidate of new Set(candidates)) {
-    if (!fs.existsSync(candidate)) {
-      continue;
-    }
-    return openCandidate(candidate);
-  }
-
-  return openCandidate(source);
-}
-
 function discoverInDirectory(params: {
   dir: string;
   origin: PluginOrigin;
@@ -678,30 +625,26 @@ function discoverInDirectory(params: {
     const extensionResolution = resolvePackageExtensionEntries(manifest ?? undefined);
     const extensions = extensionResolution.status === "ok" ? extensionResolution.entries : [];
     const manifestId = resolveIdHintManifestId(fullPath, rejectHardlinks);
-    const setupEntryPath = getPackageManifestMetadata(manifest ?? undefined)?.setupEntry;
-    const setupSource =
-      typeof setupEntryPath === "string" && setupEntryPath.trim().length > 0
-        ? resolvePackageEntrySource({
-            packageDir: fullPath,
-            entryPath: setupEntryPath,
-            sourceLabel: fullPath,
-            diagnostics: params.diagnostics,
-            rejectHardlinks,
-          })
-        : null;
+    const setupSource = resolvePackageSetupSource({
+      packageDir: fullPath,
+      manifest,
+      origin: params.origin,
+      sourceLabel: fullPath,
+      diagnostics: params.diagnostics,
+      rejectHardlinks,
+    });
 
     if (extensions.length > 0) {
-      for (const extPath of extensions) {
-        const resolved = resolvePackageEntrySource({
-          packageDir: fullPath,
-          entryPath: extPath,
-          sourceLabel: fullPath,
-          diagnostics: params.diagnostics,
-          rejectHardlinks,
-        });
-        if (!resolved) {
-          continue;
-        }
+      const resolvedRuntimeSources = resolvePackageRuntimeExtensionSources({
+        packageDir: fullPath,
+        manifest,
+        extensions,
+        origin: params.origin,
+        sourceLabel: fullPath,
+        diagnostics: params.diagnostics,
+        rejectHardlinks,
+      });
+      for (const resolved of resolvedRuntimeSources) {
         addCandidate({
           candidates: params.candidates,
           diagnostics: params.diagnostics,
@@ -818,30 +761,26 @@ function discoverFromPath(params: {
     const extensionResolution = resolvePackageExtensionEntries(manifest ?? undefined);
     const extensions = extensionResolution.status === "ok" ? extensionResolution.entries : [];
     const manifestId = resolveIdHintManifestId(resolved, rejectHardlinks);
-    const setupEntryPath = getPackageManifestMetadata(manifest ?? undefined)?.setupEntry;
-    const setupSource =
-      typeof setupEntryPath === "string" && setupEntryPath.trim().length > 0
-        ? resolvePackageEntrySource({
-            packageDir: resolved,
-            entryPath: setupEntryPath,
-            sourceLabel: resolved,
-            diagnostics: params.diagnostics,
-            rejectHardlinks,
-          })
-        : null;
+    const setupSource = resolvePackageSetupSource({
+      packageDir: resolved,
+      manifest,
+      origin: params.origin,
+      sourceLabel: resolved,
+      diagnostics: params.diagnostics,
+      rejectHardlinks,
+    });
 
     if (extensions.length > 0) {
-      for (const extPath of extensions) {
-        const source = resolvePackageEntrySource({
-          packageDir: resolved,
-          entryPath: extPath,
-          sourceLabel: resolved,
-          diagnostics: params.diagnostics,
-          rejectHardlinks,
-        });
-        if (!source) {
-          continue;
-        }
+      const resolvedRuntimeSources = resolvePackageRuntimeExtensionSources({
+        packageDir: resolved,
+        manifest,
+        extensions,
+        origin: params.origin,
+        sourceLabel: resolved,
+        diagnostics: params.diagnostics,
+        rejectHardlinks,
+      });
+      for (const source of resolvedRuntimeSources) {
         addCandidate({
           candidates: params.candidates,
           diagnostics: params.diagnostics,
@@ -946,6 +885,18 @@ export function discoverOpenClawPlugins(params: {
         if (!trimmed) {
           continue;
         }
+        const bundledAlias = resolvePackagedBundledLoadPathAlias({
+          bundledRoot: roots.stock,
+          loadPath: resolveUserPath(trimmed, env),
+        });
+        if (bundledAlias) {
+          result.diagnostics.push({
+            level: "warn",
+            source: trimmed,
+            message: `ignored plugins.load.paths entry that points at OpenClaw's ${bundledAlias.kind} bundled plugin directory; remove this redundant path or run openclaw doctor --fix`,
+          });
+          continue;
+        }
         discoverFromPath({
           rawPath: trimmed,
           origin: "config",
@@ -985,6 +936,27 @@ export function discoverOpenClawPlugins(params: {
     load: () => {
       const result = createDiscoveryResult();
       const seen = new Set<string>();
+      for (const sourceOverlayDir of listBundledSourceOverlayDirs({
+        bundledRoot: roots.stock,
+        env,
+      })) {
+        discoverFromPath({
+          rawPath: sourceOverlayDir,
+          origin: "bundled",
+          ownershipUid: params.ownershipUid,
+          workspaceDir,
+          env,
+          candidates: result.candidates,
+          diagnostics: result.diagnostics,
+          seen,
+        });
+        result.diagnostics.push({
+          level: "warn",
+          source: sourceOverlayDir,
+          message:
+            "using bind-mounted bundled plugin source overlay; this source overrides the packaged dist bundle for the same plugin id",
+        });
+      }
       if (roots.stock) {
         discoverInDirectory({
           dir: roots.stock,

@@ -361,6 +361,7 @@ export async function runPreflightCompactionIfNeeded(params: {
   sessionEntry?: SessionEntry;
   sessionStore?: Record<string, SessionEntry>;
   sessionKey?: string;
+  runtimePolicySessionKey?: string;
   storePath?: string;
   isHeartbeat: boolean;
   replyOperation: ReplyOperation;
@@ -463,6 +464,7 @@ export async function runPreflightCompactionIfNeeded(params: {
   const result = await memoryDeps.compactEmbeddedPiSession({
     sessionId: entry.sessionId,
     sessionKey: params.sessionKey,
+    sandboxSessionKey: params.runtimePolicySessionKey,
     allowGatewaySubagentBinding: true,
     messageChannel: params.followupRun.run.messageProvider,
     groupId: entry.groupId ?? params.followupRun.run.groupId,
@@ -479,6 +481,8 @@ export async function runPreflightCompactionIfNeeded(params: {
     skillsSnapshot: entry.skillsSnapshot ?? params.followupRun.run.skillsSnapshot,
     provider: params.followupRun.run.provider,
     model: params.followupRun.run.model,
+    agentHarnessId:
+      entry.sessionId === params.followupRun.run.sessionId ? entry.agentHarnessId : undefined,
     thinkLevel: params.followupRun.run.thinkLevel,
     bashElevated: params.followupRun.run.bashElevated,
     trigger: "budget",
@@ -502,12 +506,31 @@ export async function runPreflightCompactionIfNeeded(params: {
     sessionKey: params.sessionKey,
     storePath: params.storePath,
     tokensAfter: result.result?.tokensAfter,
+    newSessionId: result.result?.sessionId,
+    newSessionFile: result.result?.sessionFile,
   });
   await appendPostCompactionRefreshPrompt({
     cfg: params.cfg,
     followupRun: params.followupRun,
   });
   entry = params.sessionStore?.[params.sessionKey] ?? entry;
+  if (entry) {
+    const previousSessionId = params.followupRun.run.sessionId;
+    params.followupRun.run.sessionId = entry.sessionId;
+    params.replyOperation.updateSessionId(entry.sessionId);
+    if (entry.sessionFile) {
+      params.followupRun.run.sessionFile = entry.sessionFile;
+    }
+    const queueKey = params.followupRun.run.sessionKey ?? params.sessionKey;
+    if (queueKey) {
+      memoryDeps.refreshQueuedFollowupSession({
+        key: queueKey,
+        previousSessionId,
+        nextSessionId: entry.sessionId,
+        nextSessionFile: entry.sessionFile,
+      });
+    }
+  }
   return entry ?? params.sessionEntry;
 }
 
@@ -523,6 +546,7 @@ export async function runMemoryFlushIfNeeded(params: {
   sessionEntry?: SessionEntry;
   sessionStore?: Record<string, SessionEntry>;
   sessionKey?: string;
+  runtimePolicySessionKey?: string;
   storePath?: string;
   isHeartbeat: boolean;
   replyOperation: ReplyOperation;
@@ -538,7 +562,7 @@ export async function runMemoryFlushIfNeeded(params: {
     }
     const runtime = resolveSandboxRuntimeStatus({
       cfg: params.cfg,
-      sessionKey: params.sessionKey,
+      sessionKey: params.runtimePolicySessionKey ?? params.sessionKey,
     });
     if (!runtime.sandboxed) {
       return true;
@@ -744,6 +768,7 @@ export async function runMemoryFlushIfNeeded(params: {
     .filter(Boolean)
     .join("\n\n");
   let postCompactionSessionId: string | undefined;
+  let postCompactionSessionFile: string | undefined;
   try {
     await memoryDeps.runWithModelFallback({
       ...resolveModelFallbackOptions(params.followupRun.run),
@@ -762,6 +787,7 @@ export async function runMemoryFlushIfNeeded(params: {
           ...embeddedContext,
           ...senderContext,
           ...runBaseParams,
+          sandboxSessionKey: params.runtimePolicySessionKey,
           allowGatewaySubagentBinding: true,
           silentExpected: true,
           trigger: "memory",
@@ -785,6 +811,9 @@ export async function runMemoryFlushIfNeeded(params: {
         if (result.meta?.agentMeta?.sessionId) {
           postCompactionSessionId = result.meta.agentMeta.sessionId;
         }
+        if (result.meta?.agentMeta?.sessionFile) {
+          postCompactionSessionFile = result.meta.agentMeta.sessionFile;
+        }
         bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
           result.meta?.systemPromptReport,
         );
@@ -804,6 +833,7 @@ export async function runMemoryFlushIfNeeded(params: {
         sessionKey: params.sessionKey,
         storePath: params.storePath,
         newSessionId: postCompactionSessionId,
+        newSessionFile: postCompactionSessionFile,
       });
       const updatedEntry = params.sessionKey ? activeSessionStore?.[params.sessionKey] : undefined;
       if (updatedEntry) {
