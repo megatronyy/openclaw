@@ -5,7 +5,7 @@ import { buildPluginsCommandParams } from "./commands.test-harness.js";
 
 const readConfigFileSnapshotMock = vi.hoisted(() => vi.fn());
 const validateConfigObjectWithPluginsMock = vi.hoisted(() => vi.fn());
-const writeConfigFileMock = vi.hoisted(() => vi.fn(async () => undefined));
+const replaceConfigFileMock = vi.hoisted(() => vi.fn(async () => undefined));
 const buildPluginRegistrySnapshotReportMock = vi.hoisted(() => vi.fn());
 const buildPluginDiagnosticsReportMock = vi.hoisted(() => vi.fn());
 const buildPluginInspectReportMock = vi.hoisted(() => vi.fn());
@@ -18,9 +18,7 @@ vi.mock("../../cli/npm-resolution.js", () => ({
 }));
 
 vi.mock("../../cli/plugins-command-helpers.js", () => ({
-  buildPreferredClawHubSpec: vi.fn(() => null),
   createPluginInstallLogger: vi.fn(() => ({})),
-  decidePreferredClawHubFallback: vi.fn(() => "fallback_to_npm"),
   resolveFileNpmSpecToLocalPath: vi.fn(() => null),
 }));
 
@@ -35,7 +33,7 @@ vi.mock("../../cli/plugins-registry-refresh.js", () => ({
 vi.mock("../../config/config.js", () => ({
   readConfigFileSnapshot: readConfigFileSnapshotMock,
   validateConfigObjectWithPlugins: validateConfigObjectWithPluginsMock,
-  writeConfigFile: writeConfigFileMock,
+  replaceConfigFile: replaceConfigFileMock,
 }));
 
 vi.mock("../../infra/archive.js", () => ({
@@ -59,10 +57,6 @@ vi.mock("../../plugins/installed-plugin-index-records.js", () => ({
   loadInstalledPluginIndexInstallRecords: vi.fn(
     async (params = {}) => params.config?.plugins?.installs ?? {},
   ),
-}));
-
-vi.mock("../../plugins/manifest-registry.js", () => ({
-  clearPluginManifestRegistryCache: vi.fn(),
 }));
 
 vi.mock("../../plugins/status.js", () => ({
@@ -212,13 +206,16 @@ describe("handlePluginsCommand", () => {
 
     const enableResult = await handlePluginsCommand(enableParams, true);
     expect(enableResult?.reply?.text).toContain('Plugin "superpowers" enabled');
-    expect(writeConfigFileMock).toHaveBeenLastCalledWith(
+    expect(replaceConfigFileMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        plugins: expect.objectContaining({
-          entries: expect.objectContaining({
-            superpowers: expect.objectContaining({ enabled: true }),
+        nextConfig: expect.objectContaining({
+          plugins: expect.objectContaining({
+            entries: expect.objectContaining({
+              superpowers: expect.objectContaining({ enabled: true }),
+            }),
           }),
         }),
+        afterWrite: { mode: "auto" },
       }),
     );
     expect(refreshPluginRegistryAfterConfigMutationMock).toHaveBeenLastCalledWith(
@@ -239,13 +236,16 @@ describe("handlePluginsCommand", () => {
 
     const disableResult = await handlePluginsCommand(disableParams, true);
     expect(disableResult?.reply?.text).toContain('Plugin "superpowers" disabled');
-    expect(writeConfigFileMock).toHaveBeenLastCalledWith(
+    expect(replaceConfigFileMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        plugins: expect.objectContaining({
-          entries: expect.objectContaining({
-            superpowers: expect.objectContaining({ enabled: false }),
+        nextConfig: expect.objectContaining({
+          plugins: expect.objectContaining({
+            entries: expect.objectContaining({
+              superpowers: expect.objectContaining({ enabled: false }),
+            }),
           }),
         }),
+        afterWrite: { mode: "auto" },
       }),
     );
     expect(refreshPluginRegistryAfterConfigMutationMock).toHaveBeenLastCalledWith(
@@ -260,6 +260,28 @@ describe("handlePluginsCommand", () => {
         }),
       }),
     );
+  });
+
+  it("refuses plugin enablement in Nix mode before reading or replacing config", async () => {
+    const previousNixMode = process.env.OPENCLAW_NIX_MODE;
+    process.env.OPENCLAW_NIX_MODE = "1";
+    try {
+      const params = buildPluginsParams("/plugins enable superpowers", buildCfg());
+      params.command.senderIsOwner = true;
+
+      const result = await handlePluginsCommand(params, true);
+      expect(result?.reply?.text).toContain("OPENCLAW_NIX_MODE=1");
+      expect(result?.reply?.text).toContain("nix-openclaw#quick-start");
+      expect(readConfigFileSnapshotMock).not.toHaveBeenCalled();
+      expect(replaceConfigFileMock).not.toHaveBeenCalled();
+      expect(refreshPluginRegistryAfterConfigMutationMock).not.toHaveBeenCalled();
+    } finally {
+      if (previousNixMode === undefined) {
+        delete process.env.OPENCLAW_NIX_MODE;
+      } else {
+        process.env.OPENCLAW_NIX_MODE = previousNixMode;
+      }
+    }
   });
 
   it("resolves write targets by indexed plugin name without loading diagnostics", async () => {

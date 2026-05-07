@@ -24,7 +24,7 @@ const {
   mockRuntimeResolveMarkdownTableMode: vi.fn(() => "preserve"),
 }));
 
-vi.mock("openclaw/plugin-sdk/config-runtime", () => ({
+vi.mock("openclaw/plugin-sdk/markdown-table-runtime", () => ({
   resolveMarkdownTableMode: mockResolveMarkdownTableMode,
 }));
 
@@ -128,7 +128,8 @@ describe("getMessageFeishu", () => {
       channel: "feishu",
     });
     expect(mockConvertMarkdownTables).toHaveBeenCalledWith("hello", "preserve");
-    expect(result).toEqual({ messageId: "om_send", chatId: "oc_send" });
+    expect(result).toMatchObject({ messageId: "om_send", chatId: "oc_send" });
+    expect(result.receipt.primaryPlatformMessageId).toBe("om_send");
   });
 
   it("extracts text content from interactive card elements", async () => {

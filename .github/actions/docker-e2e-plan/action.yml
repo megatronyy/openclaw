@@ -26,6 +26,10 @@ inputs:
     description: Whether to download/pull artifacts required by the plan.
     required: false
     default: "true"
+  package-artifact-name:
+    description: Workflow artifact name containing openclaw-current.tgz.
+    required: false
+    default: docker-e2e-package
 outputs:
   credentials:
     description: Comma-separated credential groups required by selected lanes.
@@ -90,6 +94,9 @@ runs:
               echo "lanes input is required for Docker E2E targeted planning." >&2
               exit 1
             fi
+            if [[ "$INCLUDE_RELEASE_PATH_SUITES" == "true" ]]; then
+              export OPENCLAW_DOCKER_ALL_PROFILE=release-path
+            fi
             export OPENCLAW_DOCKER_ALL_LANES="$LANES"
             plan_path=".artifacts/docker-tests/targeted-plan.json"
             ;;
@@ -108,7 +115,7 @@ runs:
       if: inputs.hydrate-artifacts == 'true' && steps.plan.outputs.needs_package == '1'
       uses: actions/download-artifact@v8
       with:
-        name: docker-e2e-package
+        name: ${{ inputs.package-artifact-name }}
         path: .artifacts/docker-e2e-package
 
     - name: Pull shared bare Docker E2E image

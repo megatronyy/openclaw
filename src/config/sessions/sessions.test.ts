@@ -11,6 +11,7 @@ import { resolveSessionLifecycleTimestamps } from "./lifecycle.js";
 import {
   resolveSessionFilePath,
   resolveSessionFilePathOptions,
+  resolveRotatedGeneratedSessionFilePath,
   resolveSessionTranscriptPathInDir,
   validateSessionId,
 } from "./paths.js";
@@ -18,7 +19,7 @@ import { evaluateSessionFreshness, resolveSessionResetPolicy } from "./reset.js"
 import { resolveAndPersistSessionFile } from "./session-file.js";
 import { clearSessionStoreCacheForTest, loadSessionStore, updateSessionStore } from "./store.js";
 import { useTempSessionsFixture } from "./test-helpers.js";
-import { mergeSessionEntry, type SessionEntry } from "./types.js";
+import { mergeSessionEntry, mergeSessionEntryWithPolicy, type SessionEntry } from "./types.js";
 
 describe("session path safety", () => {
   it("rejects unsafe session IDs", () => {
@@ -50,6 +51,57 @@ describe("session path safety", () => {
       { sessionsDir },
     );
     expect(resolved).toBe(path.resolve(sessionsDir, "sess-1.jsonl"));
+  });
+
+  it("rotates generated transcript paths when session id changes", () => {
+    const sessionsDir = "/tmp/openclaw/agents/main/sessions";
+    const previousSessionFile = path.join(sessionsDir, "sess-1.jsonl");
+
+    const resolved = resolveRotatedGeneratedSessionFilePath({
+      previousSessionId: "sess-1",
+      nextSessionId: "sess-2",
+      previousSessionFile,
+      sessionsDir,
+    });
+
+    expect(resolved).toBe(path.resolve(sessionsDir, "sess-2.jsonl"));
+  });
+
+  it("rotates already-stale generated UUID transcript paths", () => {
+    const sessionsDir = "/tmp/openclaw/agents/main/sessions";
+    const staleSessionFile = path.join(sessionsDir, "685a51f7-7adf-48b1-89ca-d3ab86dd6e0f.jsonl");
+
+    const resolved = resolveRotatedGeneratedSessionFilePath({
+      previousSessionId: "63b16647-ea0c-4a22-808b-ce616326b445",
+      nextSessionId: "a8ea43fe-8729-4742-8db0-d4ab4522d5d1",
+      previousSessionFile: staleSessionFile,
+      sessionsDir,
+    });
+
+    expect(resolved).toBe(path.resolve(sessionsDir, "a8ea43fe-8729-4742-8db0-d4ab4522d5d1.jsonl"));
+  });
+
+  it("does not rotate custom transcript paths when session id changes", () => {
+    const sessionsDir = "/tmp/openclaw/agents/main/sessions";
+    const customPath = path.join(sessionsDir, "custom-owned-child-transcript.jsonl");
+
+    const resolved = resolveRotatedGeneratedSessionFilePath({
+      previousSessionId: "sess-1",
+      nextSessionId: "sess-2",
+      previousSessionFile: customPath,
+      sessionsDir,
+    });
+
+    expect(resolved).toBeUndefined();
+  });
+
+  it("keeps topic transcript paths when the persisted sessionFile matches the session id", () => {
+    const sessionsDir = "/tmp/openclaw/agents/main/sessions";
+    const topicPath = path.join(sessionsDir, "sess-1-topic-456.jsonl");
+
+    const resolved = resolveSessionFilePath("sess-1", { sessionFile: topicPath }, { sessionsDir });
+
+    expect(resolved).toBe(path.resolve(topicPath));
   });
 
   it("ignores multi-store sentinel paths when deriving session file options", () => {
@@ -202,6 +254,38 @@ describe("resolveSessionResetPolicy", () => {
       idleExpiresAt: 5 * 60_000,
     });
   });
+
+  it("does not let future legacy updatedAt values keep daily sessions fresh", () => {
+    const now = new Date(2026, 3, 25, 12, 0, 0, 0).getTime();
+    const freshness = evaluateSessionFreshness({
+      updatedAt: now + 30 * 24 * 60 * 60_000,
+      now,
+      policy: {
+        mode: "daily",
+        atHour: 4,
+      },
+    });
+
+    expect(freshness.fresh).toBe(false);
+  });
+
+  it("does not let future legacy updatedAt values keep idle sessions fresh", () => {
+    const now = 60 * 60_000;
+    const freshness = evaluateSessionFreshness({
+      updatedAt: now + 30 * 24 * 60 * 60_000,
+      now,
+      policy: {
+        mode: "idle",
+        atHour: 4,
+        idleMinutes: 5,
+      },
+    });
+
+    expect(freshness).toMatchObject({
+      fresh: false,
+      idleExpiresAt: 5 * 60_000,
+    });
+  });
 });
 
 describe("session lifecycle timestamps", () => {
@@ -239,15 +323,13 @@ describe("session lifecycle timestamps", () => {
   });
 });
 
-describe("session store lock (Promise chain mutex)", () => {
-  const lockFixtureRootTracker = createSuiteTempRootTracker({ prefix: "openclaw-lock-test-" });
-  let lockTmpDirs: string[] = [];
+describe("session store writer queue", () => {
+  const writerFixtureRootTracker = createSuiteTempRootTracker({ prefix: "openclaw-writer-test-" });
 
   async function makeTmpStore(
     initial: Record<string, unknown> = {},
   ): Promise<{ dir: string; storePath: string }> {
-    const dir = await lockFixtureRootTracker.make("case");
-    lockTmpDirs.push(dir);
+    const dir = await writerFixtureRootTracker.make("case");
     const storePath = path.join(dir, "sessions.json");
     if (Object.keys(initial).length > 0) {
       await fsPromises.writeFile(storePath, JSON.stringify(initial, null, 2), "utf-8");
@@ -256,16 +338,15 @@ describe("session store lock (Promise chain mutex)", () => {
   }
 
   beforeAll(async () => {
-    await lockFixtureRootTracker.setup();
+    await writerFixtureRootTracker.setup();
   });
 
   afterAll(async () => {
-    await lockFixtureRootTracker.cleanup();
+    await writerFixtureRootTracker.cleanup();
   });
 
   afterEach(async () => {
     clearSessionStoreCacheForTest();
-    lockTmpDirs = [];
   });
 
   it("serializes concurrent updateSessionStore calls without data loss", async () => {
@@ -347,6 +428,36 @@ describe("session store lock (Promise chain mutex)", () => {
     );
     expect(merged.model).toBe("gpt-5.4");
     expect(merged.modelProvider).toBeUndefined();
+  });
+
+  it("caps future updatedAt values at the session merge boundary", () => {
+    const now = 1_000;
+    const merged = mergeSessionEntryWithPolicy(
+      {
+        sessionId: "sess-future",
+        updatedAt: now + 10_000,
+      },
+      {
+        updatedAt: now + 20_000,
+      },
+      { now },
+    );
+
+    expect(merged.updatedAt).toBe(now);
+  });
+
+  it("caps future updatedAt values while preserving activity", () => {
+    const now = 1_000;
+    const merged = mergeSessionEntryWithPolicy(
+      {
+        sessionId: "sess-preserve-future",
+        updatedAt: now + 10_000,
+      },
+      {},
+      { now, policy: "preserve-activity" },
+    );
+
+    expect(merged.updatedAt).toBe(now);
   });
 
   it("normalizes orphan modelProvider fields at store write boundary", async () => {

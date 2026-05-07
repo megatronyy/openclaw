@@ -2,10 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeAgentAssistantMessage } from "../test-helpers/agent-message-fixtures.js";
 import {
   rotateTranscriptAfterCompaction,
+  rotateTranscriptFileAfterCompaction,
   shouldRotateCompactionTranscript,
 } from "./compaction-successor-transcript.js";
 import { hardenManualCompactionBoundary } from "./manual-compaction-boundary.js";
@@ -54,6 +55,30 @@ function createCompactedSession(sessionDir: string): {
 }
 
 describe("rotateTranscriptAfterCompaction", () => {
+  it("can rotate a persisted transcript without opening a manager", async () => {
+    const dir = await createTmpDir();
+    const { sessionFile } = createCompactedSession(dir);
+
+    const openSpy = vi.spyOn(SessionManager, "open").mockImplementation(() => {
+      throw new Error("SessionManager.open should not be used for file rotation");
+    });
+    const result = await rotateTranscriptFileAfterCompaction({
+      sessionFile,
+      now: () => new Date("2026-04-27T12:00:00.000Z"),
+    });
+    openSpy.mockRestore();
+
+    expect(result.rotated).toBe(true);
+    expect(result.sessionFile).toBeTruthy();
+
+    const successor = SessionManager.open(result.sessionFile!);
+    expect(successor.getHeader()).toMatchObject({
+      parentSession: sessionFile,
+      cwd: dir,
+    });
+    expect(successor.buildSessionContext().messages.length).toBeGreaterThan(0);
+  });
+
   it("creates a compacted successor transcript and leaves the archive untouched", async () => {
     const dir = await createTmpDir();
     const { manager, sessionFile, firstKeptId, oldUserId } = createCompactedSession(dir);
@@ -151,6 +176,39 @@ describe("rotateTranscriptAfterCompaction", () => {
     const context = successor.buildSessionContext();
     expect(context.thinkingLevel).toBe("high");
     expect(successor.getSessionName()).toBe("current title");
+  });
+
+  it("drops duplicate user messages from the rotated active branch tail", async () => {
+    const dir = await createTmpDir();
+    const manager = SessionManager.create(dir, dir);
+    manager.appendMessage({ role: "user", content: "old user", timestamp: 1 });
+    const firstKeptId = manager.appendMessage(makeAssistant("old assistant", 2));
+    manager.appendCompaction("Summary of old work.", firstKeptId, 5000);
+    const firstDuplicateId = manager.appendMessage({
+      role: "user",
+      content: "please run the deployment status check for production",
+      timestamp: 3_000,
+    });
+    const secondDuplicateId = manager.appendMessage({
+      role: "user",
+      content: " please   run the deployment status check for production ",
+      timestamp: 4_000,
+    });
+    manager.appendMessage(makeAssistant("status checked", 5_000));
+
+    const result = await rotateTranscriptAfterCompaction({
+      sessionManager: manager,
+      sessionFile: manager.getSessionFile()!,
+      now: () => new Date("2026-04-27T12:10:00.000Z"),
+    });
+
+    expect(result.rotated).toBe(true);
+    const successor = SessionManager.open(result.sessionFile!);
+    const entries = successor.getEntries();
+    expect(entries.find((entry) => entry.id === firstDuplicateId)).toBeDefined();
+    expect(entries.find((entry) => entry.id === secondDuplicateId)).toBeUndefined();
+    const contextText = JSON.stringify(successor.buildSessionContext().messages);
+    expect(contextText.match(/deployment status check/g)).toHaveLength(1);
   });
 
   it("skips sessions with no compaction entry", async () => {

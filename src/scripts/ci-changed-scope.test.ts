@@ -2,31 +2,37 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { bundledPluginFile } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, it } from "vitest";
-import { bundledPluginFile } from "../../test/helpers/bundled-plugin-paths.js";
 
-const { detectChangedScope, detectInstallSmokeScope, detectNodeFastScope, listChangedPaths } =
-  (await import("../../scripts/ci-changed-scope.mjs")) as unknown as {
-    detectChangedScope: (paths: string[]) => {
-      runNode: boolean;
-      runMacos: boolean;
-      runAndroid: boolean;
-      runWindows: boolean;
-      runSkillsPython: boolean;
-      runChangedSmoke: boolean;
-      runControlUiI18n: boolean;
-    };
-    detectInstallSmokeScope: (paths: string[]) => {
-      runFastInstallSmoke: boolean;
-      runFullInstallSmoke: boolean;
-    };
-    detectNodeFastScope: (paths: string[]) => {
-      runFastOnly: boolean;
-      runPluginContracts: boolean;
-      runCiRouting: boolean;
-    };
-    listChangedPaths: (base: string, head?: string) => string[];
+const {
+  detectChangedScope,
+  detectInstallSmokeScope,
+  detectNodeFastScope,
+  detectPromptSnapshotScope,
+  listChangedPaths,
+} = (await import("../../scripts/ci-changed-scope.mjs")) as unknown as {
+  detectChangedScope: (paths: string[]) => {
+    runNode: boolean;
+    runMacos: boolean;
+    runAndroid: boolean;
+    runWindows: boolean;
+    runSkillsPython: boolean;
+    runChangedSmoke: boolean;
+    runControlUiI18n: boolean;
   };
+  detectInstallSmokeScope: (paths: string[]) => {
+    runFastInstallSmoke: boolean;
+    runFullInstallSmoke: boolean;
+  };
+  detectNodeFastScope: (paths: string[]) => {
+    runFastOnly: boolean;
+    runPluginContracts: boolean;
+    runCiRouting: boolean;
+  };
+  detectPromptSnapshotScope: (paths: string[]) => boolean;
+  listChangedPaths: (base: string, head?: string) => string[];
+};
 
 const markerPaths: string[] = [];
 const tempDirs: string[] = [];
@@ -124,6 +130,24 @@ describe("detectChangedScope", () => {
       runChangedSmoke: false,
       runControlUiI18n: false,
     });
+    expect(detectChangedScope(["apps/swabble/Sources/SwabbleKit/WakeWordGate.swift"])).toEqual({
+      runNode: false,
+      runMacos: true,
+      runAndroid: false,
+      runWindows: false,
+      runSkillsPython: false,
+      runChangedSmoke: false,
+      runControlUiI18n: false,
+    });
+    expect(detectChangedScope(["Swabble/Sources/SwabbleKit/WakeWordGate.swift"])).toEqual({
+      runNode: false,
+      runMacos: true,
+      runAndroid: false,
+      runWindows: false,
+      runSkillsPython: false,
+      runChangedSmoke: false,
+      runControlUiI18n: false,
+    });
   });
 
   it("does not force macOS for generated protocol model-only changes", () => {
@@ -151,7 +175,7 @@ describe("detectChangedScope", () => {
       runControlUiI18n: false,
     });
 
-    expect(detectChangedScope(["assets/icon.png"])).toEqual({
+    expect(detectChangedScope([".crabbox.yaml"])).toEqual({
       runNode: true,
       runMacos: false,
       runAndroid: false,
@@ -187,7 +211,7 @@ describe("detectChangedScope", () => {
   });
 
   it("runs Python skill tests when shared Python config changes", () => {
-    expect(detectChangedScope(["pyproject.toml"])).toEqual({
+    expect(detectChangedScope(["skills/pyproject.toml"])).toEqual({
       runNode: true,
       runMacos: false,
       runAndroid: false,
@@ -239,6 +263,33 @@ describe("detectChangedScope", () => {
       runControlUiI18n: false,
     });
     expect(detectChangedScope(["src/process/exec.windows.test.ts"])).toEqual({
+      runNode: true,
+      runMacos: false,
+      runAndroid: false,
+      runWindows: true,
+      runSkillsPython: false,
+      runChangedSmoke: false,
+      runControlUiI18n: false,
+    });
+    expect(detectChangedScope(["src/shared/runtime-import.ts"])).toEqual({
+      runNode: true,
+      runMacos: false,
+      runAndroid: false,
+      runWindows: true,
+      runSkillsPython: false,
+      runChangedSmoke: false,
+      runControlUiI18n: false,
+    });
+    expect(detectChangedScope(["src/shared/runtime-import.test.ts"])).toEqual({
+      runNode: true,
+      runMacos: false,
+      runAndroid: false,
+      runWindows: true,
+      runSkillsPython: false,
+      runChangedSmoke: false,
+      runControlUiI18n: false,
+    });
+    expect(detectChangedScope(["src/plugins/import-specifier.test.ts"])).toEqual({
       runNode: true,
       runMacos: false,
       runAndroid: false,
@@ -313,15 +364,6 @@ describe("detectChangedScope", () => {
       runChangedSmoke: true,
       runControlUiI18n: false,
     });
-    expect(detectChangedScope(["scripts/e2e/bundled-channel-runtime-deps-docker.sh"])).toEqual({
-      runNode: true,
-      runMacos: false,
-      runAndroid: false,
-      runWindows: false,
-      runSkillsPython: false,
-      runChangedSmoke: true,
-      runControlUiI18n: false,
-    });
     expect(detectChangedScope(["scripts/e2e/agents-delete-shared-workspace-docker.sh"])).toEqual({
       runNode: true,
       runMacos: false,
@@ -350,15 +392,6 @@ describe("detectChangedScope", () => {
       runControlUiI18n: false,
     });
     expect(detectChangedScope(["scripts/ci-changed-scope.mjs"])).toEqual({
-      runNode: true,
-      runMacos: false,
-      runAndroid: false,
-      runWindows: false,
-      runSkillsPython: false,
-      runChangedSmoke: true,
-      runControlUiI18n: false,
-    });
-    expect(detectChangedScope(["src/plugins/bundled-runtime-deps.ts"])).toEqual({
       runNode: true,
       runMacos: false,
       runAndroid: false,
@@ -500,7 +533,7 @@ describe("detectChangedScope", () => {
       detectNodeFastScope([
         bundledCapabilityMetadataPath,
         "src/plugins/contracts/registry.ts",
-        "test/helpers/plugins/tts-contract-suites.ts",
+        "src/plugins/contracts/tts-contract-suites.ts",
         "scripts/test-projects.test-support.mjs",
         "test/scripts/test-projects.test.ts",
       ]),
@@ -587,6 +620,23 @@ describe("detectChangedScope", () => {
       run_fast_install_smoke: "false",
       run_full_install_smoke: "false",
       run_control_ui_i18n: "false",
+      run_prompt_snapshots: "false",
     });
+  });
+
+  it("runs prompt snapshots only for prompt-affecting paths", () => {
+    expect(detectPromptSnapshotScope([])).toBe(true);
+    expect(
+      detectPromptSnapshotScope(["src/agents/failover-error.ts", "src/agents/model-fallback.ts"]),
+    ).toBe(false);
+    expect(detectPromptSnapshotScope(["extensions/codex/src/app-server/thread-lifecycle.ts"])).toBe(
+      true,
+    );
+    expect(
+      detectPromptSnapshotScope([
+        "test/fixtures/agents/prompt-snapshots/codex-runtime-happy-path/README.md",
+      ]),
+    ).toBe(true);
+    expect(detectPromptSnapshotScope(["src/agents/pi-tools.schema.ts"])).toBe(true);
   });
 });

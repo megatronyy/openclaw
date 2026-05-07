@@ -11,6 +11,7 @@ import { isAbortError } from "../infra/unhandled-rejections.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { DEFAULT_CONTEXT_TOKENS } from "./defaults.js";
 import { isTimeoutError } from "./failover-error.js";
+import { stripRuntimeContextCustomMessages } from "./internal-runtime-context.js";
 import { repairToolUseResultPairing, stripToolResultDetails } from "./session-transcript-repair.js";
 import { extractToolCallsFromAssistant, extractToolResultId } from "./tool-call-id.js";
 
@@ -101,8 +102,8 @@ export function buildCompactionSummarizationInstructions(
 }
 
 export function estimateMessagesTokens(messages: AgentMessage[]): number {
-  // SECURITY: toolResult.details can contain untrusted/verbose payloads; never include in LLM-facing compaction.
-  const safe = stripToolResultDetails(messages);
+  // SECURITY: toolResult.details and runtime-context transcript entries must never enter LLM-facing compaction.
+  const safe = stripToolResultDetails(stripRuntimeContextCustomMessages(messages));
   return safe.reduce((sum, message) => sum + estimateTokens(message), 0);
 }
 
@@ -305,21 +306,30 @@ async function summarizeChunks(params: {
     return params.previousSummary ?? DEFAULT_SUMMARY_FALLBACK;
   }
 
-  // SECURITY: never feed toolResult.details into summarization prompts.
-  const safeMessages = stripToolResultDetails(params.messages);
+  // SECURITY: never feed toolResult.details or runtime-context transcript entries into summarization prompts.
+  const safeMessages = stripToolResultDetails(stripRuntimeContextCustomMessages(params.messages));
   const chunks = chunkMessagesByMaxTokens(safeMessages, params.maxChunkTokens);
   let summary = params.previousSummary;
   const effectiveInstructions = buildCompactionSummarizationInstructions(
     params.customInstructions,
     params.summarizationInstructions,
   );
+
+  // Clamp reserveTokens to the model's maxTokens output cap.
+  // generateSummary() uses Math.floor(0.8 * reserveTokens) as max_tokens for the API call.
+  // With large context windows (1M tokens), reserveTokensFloor can be 300K+, producing
+  // max_tokens of 240K+ which exceeds model output limits (e.g. 128K for Anthropic).
+  // By clamping reserveTokens here, we ensure the downstream max_tokens stays within bounds.
+  const modelMaxTokens = params.model.maxTokens ?? 128_000;
+  const clampedReserveTokens = Math.min(params.reserveTokens, Math.floor(modelMaxTokens / 0.8));
+
   for (const chunk of chunks) {
     summary = await retryAsync(
       () =>
         generateSummary(
           chunk,
           params.model,
-          params.reserveTokens,
+          clampedReserveTokens,
           params.apiKey,
           params.headers,
           params.signal,
