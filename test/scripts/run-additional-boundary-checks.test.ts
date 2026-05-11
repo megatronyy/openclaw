@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   BOUNDARY_CHECKS,
-  filterChecksForEnvironment,
   formatCommand,
   parseShardSpec,
   resolveConcurrency,
@@ -31,16 +30,6 @@ describe("run-additional-boundary-checks", () => {
     });
   });
 
-  it("skips prompt snapshot drift checks when preflight says they are unrelated", () => {
-    expect(
-      filterChecksForEnvironment(BOUNDARY_CHECKS, { OPENCLAW_RUN_PROMPT_SNAPSHOTS: "false" }),
-    ).not.toContainEqual({
-      label: "prompt:snapshots:check",
-      command: "pnpm",
-      args: ["prompt:snapshots:check"],
-    });
-  });
-
   it("normalizes concurrency input", () => {
     expect(resolveConcurrency("6")).toBe(6);
     expect(resolveConcurrency("0")).toBe(4);
@@ -61,8 +50,8 @@ describe("run-additional-boundary-checks", () => {
     const shardedLabels = [1, 2, 3, 4].flatMap((index) =>
       selectChecksForShard(BOUNDARY_CHECKS, `${index}/4`).map((check) => check.label),
     );
-    expect(shardedLabels.toSorted()).toEqual(
-      BOUNDARY_CHECKS.map((check) => check.label).toSorted(),
+    expect(shardedLabels.toSorted((a, b) => a.localeCompare(b))).toEqual(
+      BOUNDARY_CHECKS.map((check) => check.label).toSorted((a, b) => a.localeCompare(b)),
     );
     expect(new Set(shardedLabels).size).toBe(BOUNDARY_CHECKS.length);
     expect(() => parseShardSpec("5/4")).toThrow("Invalid shard spec");
