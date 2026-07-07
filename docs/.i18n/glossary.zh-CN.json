@@ -4,6 +4,14 @@
     "target": "OpenClaw"
   },
   {
+    "source": "macOS platform notes",
+    "target": "macOS 平台说明"
+  },
+  {
+    "source": "Logging",
+    "target": "日志"
+  },
+  {
     "source": "iMessage",
     "target": "iMessage"
   },
@@ -12,8 +20,16 @@
     "target": "Coming from BlueBubbles"
   },
   {
+    "source": "BlueBubbles removal and the imsg iMessage path",
+    "target": "BlueBubbles removal and the imsg iMessage path"
+  },
+  {
     "source": "BlueBubbles",
     "target": "BlueBubbles"
+  },
+  {
+    "source": "Configuration reference - iMessage",
+    "target": "Configuration reference - iMessage"
   },
   {
     "source": "Pairing",
@@ -28,6 +44,22 @@
     "target": "ClawHub"
   },
   {
+    "source": "ClawRouter (managed multi-provider routing)",
+    "target": "ClawRouter（托管式多提供商路由）"
+  },
+  {
+    "source": "ClawRouter",
+    "target": "ClawRouter"
+  },
+  {
+    "source": "ClawRouter plugin",
+    "target": "ClawRouter 插件"
+  },
+  {
+    "source": "clawrouter",
+    "target": "clawrouter"
+  },
+  {
     "source": "OpenAI",
     "target": "OpenAI"
   },
@@ -38,14 +70,6 @@
   {
     "source": "Mantis",
     "target": "Mantis"
-  },
-  {
-    "source": "OpenClaw App SDK",
-    "target": "OpenClaw 应用 SDK"
-  },
-  {
-    "source": "OpenClaw App SDK API design",
-    "target": "OpenClaw 应用 SDK API 设计"
   },
   {
     "source": "Message lifecycle refactor",
@@ -93,11 +117,15 @@
   },
   {
     "source": "Status",
-    "target": "Status"
+    "target": "状态"
   },
   {
     "source": "Gateway",
     "target": "Gateway 网关"
+  },
+  {
+    "source": "Gateway health",
+    "target": "Gateway 健康"
   },
   {
     "source": "Gateway RPC reference",
@@ -122,6 +150,10 @@
   {
     "source": "Agent Runtimes",
     "target": "Agent Runtimes"
+  },
+  {
+    "source": "Code mode",
+    "target": "代码模式"
   },
   {
     "source": "Codex harness",
@@ -150,6 +182,26 @@
   {
     "source": "Agent harness plugins",
     "target": "Agent harness plugins"
+  },
+  {
+    "source": "Agent harness plugins (SDK reference)",
+    "target": "Agent harness plugins (SDK reference)"
+  },
+  {
+    "source": "Copilot SDK harness",
+    "target": "Copilot SDK harness"
+  },
+  {
+    "source": "Copilot plugin",
+    "target": "Copilot plugin"
+  },
+  {
+    "source": "GitHub Copilot agent runtime",
+    "target": "GitHub Copilot agent runtime"
+  },
+  {
+    "source": "copilot",
+    "target": "copilot"
   },
   {
     "source": "Agent loop",
@@ -220,8 +272,64 @@
     "target": "Feishu"
   },
   {
+    "source": "ClickClack",
+    "target": "ClickClack"
+  },
+  {
+    "source": "IRC",
+    "target": "IRC"
+  },
+  {
+    "source": "LINE",
+    "target": "LINE"
+  },
+  {
+    "source": "Nextcloud Talk",
+    "target": "Nextcloud Talk"
+  },
+  {
+    "source": "Nostr",
+    "target": "Nostr"
+  },
+  {
+    "source": "QQ bot",
+    "target": "QQ Bot"
+  },
+  {
+    "source": "SMS",
+    "target": "SMS"
+  },
+  {
+    "source": "Synology Chat",
+    "target": "Synology Chat"
+  },
+  {
+    "source": "Tlon",
+    "target": "Tlon"
+  },
+  {
+    "source": "Twitch",
+    "target": "Twitch"
+  },
+  {
+    "source": "Twilio",
+    "target": "Twilio"
+  },
+  {
     "source": "Yuanbao",
     "target": "腾讯元宝"
+  },
+  {
+    "source": "Zalo",
+    "target": "Zalo"
+  },
+  {
+    "source": "Zalo Personal",
+    "target": "Zalo Personal"
+  },
+  {
+    "source": "Zalo personal",
+    "target": "Zalo Personal"
   },
   {
     "source": "WeChat",
@@ -520,12 +628,20 @@
     "target": "QQ Bot"
   },
   {
+    "source": "QQBot",
+    "target": "QQ Bot"
+  },
+  {
     "source": "Release Policy",
     "target": "发布策略"
   },
   {
     "source": "Release policy",
     "target": "发布策略"
+  },
+  {
+    "source": "Release notes",
+    "target": "发布说明"
   },
   {
     "source": "for full details",
@@ -636,12 +752,44 @@
     "target": "插件 SDK"
   },
   {
+    "source": "Tool plugins",
+    "target": "工具插件"
+  },
+  {
+    "source": "Plugin SDK subpaths",
+    "target": "插件 SDK 子路径"
+  },
+  {
+    "source": "Plugins CLI",
+    "target": "插件 CLI"
+  },
+  {
     "source": "Plugins",
     "target": "插件"
   },
   {
     "source": "Manage plugins",
     "target": "管理插件"
+  },
+  {
+    "source": "Plugin inventory",
+    "target": "插件清单"
+  },
+  {
+    "source": "Plugin reference",
+    "target": "插件参考"
+  },
+  {
+    "source": "Community plugins",
+    "target": "社区插件"
+  },
+  {
+    "source": "ClawHub publishing",
+    "target": "ClawHub 发布"
+  },
+  {
+    "source": "Plugin dependency resolution",
+    "target": "插件依赖解析"
   },
   {
     "source": "Plugin path ownership",
@@ -654,6 +802,14 @@
   {
     "source": "OC Path plugin",
     "target": "OC Path 插件"
+  },
+  {
+    "source": "Parallel plugin",
+    "target": "Parallel 插件"
+  },
+  {
+    "source": "Parallel search",
+    "target": "Parallel 搜索"
   },
   {
     "source": "CLI reference",
@@ -808,6 +964,14 @@
     "target": "Matrix QA"
   },
   {
+    "source": "Maturity scorecard",
+    "target": "成熟度评分卡"
+  },
+  {
+    "source": "Maturity taxonomy",
+    "target": "成熟度分类法"
+  },
+  {
     "source": "Matrix presentation metadata",
     "target": "Matrix 呈现元数据"
   },
@@ -828,8 +992,8 @@
     "target": "轨迹导出"
   },
   {
-    "source": "Tencent Cloud (TokenHub)",
-    "target": "腾讯云（TokenHub）"
+    "source": "Tencent Cloud (TokenHub / TokenPlan)",
+    "target": "腾讯云（TokenHub / TokenPlan）"
   },
   {
     "source": "Codex Harness Context Engine Port",
@@ -860,12 +1024,76 @@
     "target": "/cli/config"
   },
   {
+    "source": "Automation",
+    "target": "自动化"
+  },
+  {
+    "source": "Tools, skills, and plugins",
+    "target": "工具、技能和插件"
+  },
+  {
+    "source": "Capabilities",
+    "target": "能力"
+  },
+  {
+    "source": "Overview",
+    "target": "概览"
+  },
+  {
+    "source": "Tools, skills, and plugins overview",
+    "target": "工具、技能和插件概览"
+  },
+  {
+    "source": "Tools overview",
+    "target": "工具概览"
+  },
+  {
+    "source": "Automation overview",
+    "target": "自动化概览"
+  },
+  {
+    "source": "Sub-agents",
+    "target": "子智能体"
+  },
+  {
+    "source": "ACP agents",
+    "target": "ACP 智能体"
+  },
+  {
+    "source": "Tools and custom providers",
+    "target": "工具和自定义提供商"
+  },
+  {
+    "source": "Exec approvals",
+    "target": "Exec 审批"
+  },
+  {
+    "source": "Elevated exec",
+    "target": "提升权限的 Exec"
+  },
+  {
+    "source": "Sandbox vs tool policy vs elevated",
+    "target": "沙箱、工具策略和提升权限"
+  },
+  {
+    "source": "Per-agent sandbox and tool restrictions",
+    "target": "按 Agent 配置的沙箱和工具限制"
+  },
+  {
+    "source": "Agents",
+    "target": "智能体"
+  },
+  {
     "source": "fs-safe Cleanup Plan",
     "target": "fs-safe Cleanup Plan"
   },
   {
     "source": "Tool Search",
     "target": "工具搜索"
+  },
+  {
+    "source": "Code execution",
+    "target": "代码执行"
   },
   {
     "source": "Tools and plugins",
@@ -882,5 +1110,293 @@
   {
     "source": "ACP agents setup",
     "target": "ACP Agents 设置"
+  },
+  {
+    "source": "Policy CLI",
+    "target": "Policy CLI"
+  },
+  {
+    "source": "Doctor lint mode",
+    "target": "Doctor lint mode"
+  },
+  {
+    "source": "ds4 (local DeepSeek V4)",
+    "target": "ds4（本地 DeepSeek V4）"
+  },
+  {
+    "source": "Dynamic Agent Creation",
+    "target": "动态 Agent 创建"
+  },
+  {
+    "source": "dynamic agent creation",
+    "target": "动态 Agent 创建"
+  },
+  {
+    "source": "multi-user isolation",
+    "target": "多用户隔离"
+  },
+  {
+    "source": "workspaceTemplate",
+    "target": "工作空间模板"
+  },
+  {
+    "source": "agentDirTemplate",
+    "target": "Agent 目录模板"
+  },
+  {
+    "source": "Per-user agent isolation",
+    "target": "每用户 Agent 隔离"
+  },
+  {
+    "source": "Gateway exposure runbook",
+    "target": "Gateway 暴露运行手册"
+  },
+  {
+    "source": "Meeting Notes CLI",
+    "target": "Meeting Notes CLI"
+  },
+  {
+    "source": "Discord voice",
+    "target": "Discord 语音"
+  },
+  {
+    "source": "Plugin management",
+    "target": "插件管理"
+  },
+  {
+    "source": "Plugin architecture",
+    "target": "插件架构"
+  },
+  {
+    "source": "Agent runtime architecture",
+    "target": "Agent runtime architecture"
+  },
+  {
+    "source": "OpenClaw agent runtime workflow",
+    "target": "OpenClaw agent runtime workflow"
+  },
+  {
+    "source": "OpenClaw agent runtime architecture",
+    "target": "OpenClaw agent runtime architecture"
+  },
+  {
+    "source": "Install and Configure Plugins",
+    "target": "安装和配置插件"
+  },
+  {
+    "source": "Building Plugins",
+    "target": "Building Plugins"
+  },
+  {
+    "source": "Plugin Manifest",
+    "target": "Plugin Manifest"
+  },
+  {
+    "source": "Workboard plugin",
+    "target": "Workboard 插件"
+  },
+  {
+    "source": "workboard",
+    "target": "workboard"
+  },
+  {
+    "source": "Control UI",
+    "target": "Control UI"
+  },
+  {
+    "source": "Models CLI",
+    "target": "模型 CLI"
+  },
+  {
+    "source": "Z.AI (GLM)",
+    "target": "Z.AI (GLM)"
+  },
+  {
+    "source": "Cohere",
+    "target": "Cohere"
+  },
+  {
+    "source": "Cohere plugin",
+    "target": "Cohere 插件"
+  },
+  {
+    "source": "cohere",
+    "target": "cohere"
+  },
+  {
+    "source": "Zalo ClawBot",
+    "target": "Zalo ClawBot"
+  },
+  {
+    "source": "Docs map",
+    "target": "文档地图"
+  },
+  {
+    "source": "Additional provider variants",
+    "target": "其他提供商变体"
+  },
+  {
+    "source": "Agent config reference",
+    "target": "Agent 配置参考"
+  },
+  {
+    "source": "Audit records",
+    "target": "审计记录"
+  },
+  {
+    "source": "Background process",
+    "target": "后台进程"
+  },
+  {
+    "source": "Channel outbound API",
+    "target": "渠道出站 API"
+  },
+  {
+    "source": "Channel routing",
+    "target": "渠道路由"
+  },
+  {
+    "source": "Channels Overview",
+    "target": "渠道概览"
+  },
+  {
+    "source": "Compaction",
+    "target": "压缩"
+  },
+  {
+    "source": "Debugging (--dev)",
+    "target": "调试（--dev）"
+  },
+  {
+    "source": "Devices",
+    "target": "设备"
+  },
+  {
+    "source": "Gateway CLI",
+    "target": "Gateway CLI"
+  },
+  {
+    "source": "Gateway configuration",
+    "target": "Gateway 配置"
+  },
+  {
+    "source": "Gmail Pub/Sub integration",
+    "target": "Gmail Pub/Sub 集成"
+  },
+  {
+    "source": "Group chats",
+    "target": "群聊"
+  },
+  {
+    "source": "Hooks",
+    "target": "Hooks"
+  },
+  {
+    "source": "Incident response",
+    "target": "事件响应"
+  },
+  {
+    "source": "Logging overview",
+    "target": "日志概览"
+  },
+  {
+    "source": "Menu bar",
+    "target": "菜单栏"
+  },
+  {
+    "source": "Message Presentation",
+    "target": "消息呈现"
+  },
+  {
+    "source": "Media understanding",
+    "target": "媒体理解"
+  },
+  {
+    "source": "Models CLI reference",
+    "target": "模型 CLI 参考"
+  },
+  {
+    "source": "Network proxy",
+    "target": "网络代理"
+  },
+  {
+    "source": "Node troubleshooting",
+    "target": "节点故障排查"
+  },
+  {
+    "source": "Nodes",
+    "target": "节点"
+  },
+  {
+    "source": "Nodes CLI",
+    "target": "节点 CLI"
+  },
+  {
+    "source": "Nodes overview",
+    "target": "节点概览"
+  },
+  {
+    "source": "NovitaAI",
+    "target": "NovitaAI"
+  },
+  {
+    "source": "Onboard",
+    "target": "引导设置"
+  },
+  {
+    "source": "Operator scopes",
+    "target": "操作员权限范围"
+  },
+  {
+    "source": "Scheduled tasks vs heartbeat",
+    "target": "定时任务与心跳对比"
+  },
+  {
+    "source": "Scheduled tasks: Troubleshooting",
+    "target": "定时任务：故障排查"
+  },
+  {
+    "source": "Session config",
+    "target": "会话配置"
+  },
+  {
+    "source": "Signal reactions",
+    "target": "Signal 表情回应"
+  },
+  {
+    "source": "Task Flow",
+    "target": "Task Flow"
+  },
+  {
+    "source": "Telegram reaction notifications",
+    "target": "Telegram 表情回应通知"
+  },
+  {
+    "source": "Threat model",
+    "target": "威胁模型"
+  },
+  {
+    "source": "Timezones",
+    "target": "时区"
+  },
+  {
+    "source": "Troubleshooting",
+    "target": "故障排查"
+  },
+  {
+    "source": "Webhooks",
+    "target": "Webhooks"
+  },
+  {
+    "source": "WhatsApp reaction level",
+    "target": "WhatsApp 表情回应级别"
+  },
+  {
+    "source": "Zalo (official Bot/webhook channel)",
+    "target": "Zalo（官方 Bot/webhook 渠道）"
+  },
+  {
+    "source": "Zalo personal channel config",
+    "target": "Zalo 个人渠道配置"
   }
 ]

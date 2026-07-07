@@ -1,10 +1,13 @@
+// Onboard command tests cover guided setup entrypoints, setup aliases, and CLI messaging.
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { formatCliCommand } from "../cli/command-format.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { onboardCommand, setupWizardCommand } from "./onboard.js";
 
 const mocks = vi.hoisted(() => ({
   runInteractiveSetup: vi.fn(async () => {}),
+  runConversationalOnboarding: vi.fn(async () => {}),
   runNonInteractiveSetup: vi.fn(async () => {}),
   readConfigFileSnapshot: vi.fn(async () => ({ exists: false, valid: false, config: {} })),
   handleReset: vi.fn(async () => {}),
@@ -12,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("./onboard-interactive.js", () => ({
   runInteractiveSetup: mocks.runInteractiveSetup,
+  runConversationalOnboarding: mocks.runConversationalOnboarding,
 }));
 
 vi.mock("./onboard-non-interactive.js", () => ({
@@ -66,10 +70,10 @@ describe("setupWizardCommand", () => {
       runtime,
     );
 
+    expect(runtime.error).toHaveBeenCalledOnce();
     expect(runtime.error).toHaveBeenCalledWith(
-      expect.stringContaining('Invalid --secret-input-mode. Use "plaintext" or "ref", or run '),
+      `Invalid --secret-input-mode. Use "plaintext" or "ref", or run ${formatCliCommand("openclaw onboard")} for the interactive setup.`,
     );
-    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("onboard"));
     expect(runtime.exit).toHaveBeenCalledWith(1);
     expect(mocks.runInteractiveSetup).not.toHaveBeenCalled();
     expect(mocks.runNonInteractiveSetup).not.toHaveBeenCalled();
@@ -161,12 +165,10 @@ describe("setupWizardCommand", () => {
       runtime,
     );
 
+    expect(runtime.error).toHaveBeenCalledOnce();
     expect(runtime.error).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Invalid --reset-scope. Use "config", "config+creds+sessions", or "full".',
-      ),
+      `Invalid --reset-scope. Use "config", "config+creds+sessions", or "full". Run ${formatCliCommand("openclaw onboard --reset --reset-scope config")} for a config-only reset.`,
     );
-    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("config-only reset"));
     expect(runtime.exit).toHaveBeenCalledWith(1);
     expect(mocks.handleReset).not.toHaveBeenCalled();
     expect(mocks.runInteractiveSetup).not.toHaveBeenCalled();
@@ -175,5 +177,50 @@ describe("setupWizardCommand", () => {
 
   it("keeps onboardCommand as an alias for setupWizardCommand", () => {
     expect(onboardCommand).toBe(setupWizardCommand);
+  });
+
+  it("routes flagless interactive onboarding to the bootstrap flow", async () => {
+    const runtime = makeRuntime();
+
+    // Unset Commander booleans arrive as false and must not force classic.
+    await setupWizardCommand(
+      { skipChannels: false, skipSkills: false, acceptRisk: false, json: false },
+      runtime,
+    );
+
+    expect(mocks.runConversationalOnboarding).toHaveBeenCalledOnce();
+    expect(mocks.runInteractiveSetup).not.toHaveBeenCalled();
+    expect(mocks.runNonInteractiveSetup).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["--classic", { classic: true }],
+    ["--flow quickstart", { flow: "quickstart" as const }],
+    ["--mode remote", { mode: "remote" as const }],
+    ["--import-from", { importFrom: "hermes" }],
+    ["--auth-choice", { authChoice: "skip" }],
+    ["--gateway-port", { gatewayPort: 19001 }],
+    ["--remote-url", { remoteUrl: "wss://gw.example.ts.net" }],
+    ["--skip-bootstrap", { skipBootstrap: true }],
+    ["--no-install-daemon", { installDaemon: false }],
+    ["--daemon-runtime", { daemonRuntime: "node" as const }],
+    ["a provider auth flag", { mistralApiKey: "sk-x" }],
+  ])("keeps the classic interactive wizard for %s", async (_label, opts) => {
+    const runtime = makeRuntime();
+
+    await setupWizardCommand(opts, runtime);
+
+    expect(mocks.runInteractiveSetup).toHaveBeenCalledOnce();
+    expect(mocks.runConversationalOnboarding).not.toHaveBeenCalled();
+  });
+
+  it("keeps non-interactive routing unchanged", async () => {
+    const runtime = makeRuntime();
+
+    await setupWizardCommand({ nonInteractive: true, acceptRisk: true }, runtime);
+
+    expect(mocks.runNonInteractiveSetup).toHaveBeenCalledOnce();
+    expect(mocks.runConversationalOnboarding).not.toHaveBeenCalled();
+    expect(mocks.runInteractiveSetup).not.toHaveBeenCalled();
   });
 });

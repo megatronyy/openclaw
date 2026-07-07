@@ -1,3 +1,4 @@
+// Alibaba tests cover video generation provider plugin behavior.
 import {
   getProviderHttpMocks,
   installProviderHttpMockCleanup,
@@ -27,6 +28,14 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function requireFirstPostJsonRequest(label: string): Record<string, unknown> {
+  const [call] = postJsonRequestMock.mock.calls;
+  if (!call) {
+    throw new Error(`expected ${label}`);
+  }
+  return requireRecord(call[0], label);
+}
+
 describe("alibaba video generation provider", () => {
   it("declares explicit mode capabilities", () => {
     expectExplicitVideoGenerationCapabilities(buildAlibabaVideoGenerationProvider());
@@ -48,7 +57,7 @@ describe("alibaba video generation provider", () => {
     });
 
     expect(postJsonRequestMock).toHaveBeenCalledOnce();
-    const request = requireRecord(postJsonRequestMock.mock.calls[0]?.[0], "DashScope request");
+    const request = requireFirstPostJsonRequest("DashScope request");
     expect(request.url).toBe(
       "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis",
     );

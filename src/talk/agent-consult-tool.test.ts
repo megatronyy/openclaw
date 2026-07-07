@@ -1,4 +1,6 @@
+// Agent consult tool tests cover tool payload validation for consult requests.
 import { describe, expect, it } from "vitest";
+import type { RealtimeVoiceTool } from "./provider-types.js";
 import {
   buildRealtimeVoiceAgentConsultChatMessage,
   buildRealtimeVoiceAgentConsultPrompt,
@@ -56,13 +58,16 @@ describe("realtime voice agent consult tool", () => {
       questionSourceLabel: "participant",
     });
 
-    expect(prompt).toContain(
-      "Live voice request from the participant during a private Google Meet",
+    expect(prompt).toBe(
+      [
+        "Live voice request from the participant during a private Google Meet.",
+        "Act as the configured OpenClaw agent on behalf of this user. Use available tools when the request asks you to do work.",
+        "When finished, return only the concise result the realtime voice agent should speak back.",
+        "Do not include markdown, tool logs, or private reasoning. Include citations only when the spoken answer needs them.",
+        "Recent voice transcript for context:\nParticipant: Can you check the repo?\nAgent: I'll verify.",
+        "User request:\nDo we support realtime tools?",
+      ].join("\n\n"),
     );
-    expect(prompt).toContain("Act as the configured OpenClaw agent on behalf of this user");
-    expect(prompt).toContain("Participant: Can you check the repo?");
-    expect(prompt).toContain("Agent: I'll verify.");
-    expect(prompt).toContain("User request:\nDo we support realtime tools?");
   });
 
   it("filters reasoning and error payloads from visible consult output", () => {
@@ -110,5 +115,39 @@ describe("realtime voice agent consult tool", () => {
       resolveRealtimeVoiceAgentConsultTools("safe-read-only", [duplicateConsultTool, customTool]),
     ).toStrictEqual([REALTIME_VOICE_AGENT_CONSULT_TOOL, customTool]);
     expect(resolveRealtimeVoiceAgentConsultTools("none", [customTool])).toEqual([customTool]);
+  });
+
+  it("quarantines custom realtime tools with unreadable names before dedupe", () => {
+    const unreadableNameTool: RealtimeVoiceTool = {
+      type: "function" as const,
+      get name(): string {
+        throw new Error("unreadable tool name");
+      },
+      description: "Unreadable custom tool",
+      parameters: { type: "object" as const, properties: {} },
+    };
+    const nonStringNameTool = {
+      type: "function" as const,
+      name: undefined,
+      description: "Malformed custom tool",
+      parameters: { type: "object" as const, properties: {} },
+    } as unknown as RealtimeVoiceTool;
+    const customTool: RealtimeVoiceTool = {
+      type: "function" as const,
+      name: "custom_lookup",
+      description: "Custom lookup",
+      parameters: { type: "object" as const, properties: {} },
+    };
+
+    expect(
+      resolveRealtimeVoiceAgentConsultTools("safe-read-only", [
+        unreadableNameTool,
+        nonStringNameTool,
+        customTool,
+      ]),
+    ).toStrictEqual([REALTIME_VOICE_AGENT_CONSULT_TOOL, customTool]);
+    expect(resolveRealtimeVoiceAgentConsultTools("none", [unreadableNameTool, customTool])).toEqual(
+      [customTool],
+    );
   });
 });

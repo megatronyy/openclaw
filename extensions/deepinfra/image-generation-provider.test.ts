@@ -1,3 +1,4 @@
+// Deepinfra tests cover image generation provider plugin behavior.
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { buildDeepInfraImageGenerationProvider } from "./image-generation-provider.js";
 
@@ -30,21 +31,50 @@ vi.mock("openclaw/plugin-sdk/provider-auth-runtime", () => ({
   resolveApiKeyForProvider: resolveApiKeyForProviderMock,
 }));
 
-vi.mock("openclaw/plugin-sdk/provider-http", () => ({
-  assertOkOrThrowHttpError: assertOkOrThrowHttpErrorMock,
-  createProviderOperationDeadline: createProviderOperationDeadlineMock,
-  postJsonRequest: postJsonRequestMock,
-  postMultipartRequest: postMultipartRequestMock,
-  resolveProviderHttpRequestConfig: resolveProviderHttpRequestConfigMock,
-  resolveProviderOperationTimeoutMs: resolveProviderOperationTimeoutMsMock,
-  sanitizeConfiguredModelProviderRequest: vi.fn((request) => request),
-}));
+vi.mock("openclaw/plugin-sdk/provider-http", async () => {
+  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/provider-http")>(
+    "openclaw/plugin-sdk/provider-http",
+  );
+  return {
+    assertOkOrThrowHttpError: assertOkOrThrowHttpErrorMock,
+    createProviderOperationDeadline: createProviderOperationDeadlineMock,
+    postJsonRequest: postJsonRequestMock,
+    postMultipartRequest: postMultipartRequestMock,
+    readProviderJsonResponse: actual.readProviderJsonResponse,
+    resolveProviderHttpRequestConfig: resolveProviderHttpRequestConfigMock,
+    resolveProviderOperationTimeoutMs: resolveProviderOperationTimeoutMsMock,
+    sanitizeConfiguredModelProviderRequest: vi.fn((request) => request),
+  };
+});
 
 afterAll(() => {
   vi.doUnmock("openclaw/plugin-sdk/provider-auth-runtime");
   vi.doUnmock("openclaw/plugin-sdk/provider-http");
   vi.resetModules();
 });
+
+function requireFirstMockArg(mock: ReturnType<typeof vi.fn>, label: string): unknown {
+  const [call] = mock.mock.calls;
+  if (!call) {
+    throw new Error(`expected ${label}`);
+  }
+  return call[0];
+}
+
+function requireFirstMockObjectArg(mock: ReturnType<typeof vi.fn>, label: string): object {
+  const value = requireFirstMockArg(mock, label);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`expected ${label}`);
+  }
+  return value;
+}
+
+function jsonResponse(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
 describe("deepinfra image generation provider", () => {
   afterEach(() => {
@@ -69,11 +99,9 @@ describe("deepinfra image generation provider", () => {
     const release = vi.fn(async () => {});
     const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
     postJsonRequestMock.mockResolvedValue({
-      response: {
-        json: async () => ({
-          data: [{ b64_json: jpegBytes.toString("base64"), revised_prompt: "red square" }],
-        }),
-      },
+      response: jsonResponse({
+        data: [{ b64_json: jpegBytes.toString("base64"), revised_prompt: "red square" }],
+      }),
       release,
     });
 
@@ -113,7 +141,7 @@ describe("deepinfra image generation provider", () => {
       ],
     ]);
     expect(postJsonRequestMock).toHaveBeenCalledOnce();
-    const [jsonRequest] = postJsonRequestMock.mock.calls[0] ?? [];
+    const jsonRequest = requireFirstMockArg(postJsonRequestMock, "DeepInfra JSON image request");
     const jsonRequestHeaders = Reflect.get(jsonRequest ?? {}, "headers");
     expect(jsonRequestHeaders).toBeInstanceOf(Headers);
     expect(Object.fromEntries((jsonRequestHeaders as Headers).entries())).toEqual({
@@ -151,17 +179,15 @@ describe("deepinfra image generation provider", () => {
 
   it("sends image edits as multipart OpenAI-compatible requests", async () => {
     postMultipartRequestMock.mockResolvedValue({
-      response: {
-        json: async () => ({
-          data: [
-            {
-              b64_json: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString(
-                "base64",
-              ),
-            },
-          ],
-        }),
-      },
+      response: jsonResponse({
+        data: [
+          {
+            b64_json: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString(
+              "base64",
+            ),
+          },
+        ],
+      }),
       release: vi.fn(async () => {}),
     });
 
@@ -175,10 +201,10 @@ describe("deepinfra image generation provider", () => {
     });
 
     expect(postMultipartRequestMock).toHaveBeenCalledOnce();
-    const [multipartRequest] = postMultipartRequestMock.mock.calls[0] ?? [];
-    if (!multipartRequest) {
-      throw new Error("Expected DeepInfra multipart request");
-    }
+    const multipartRequest = requireFirstMockObjectArg(
+      postMultipartRequestMock,
+      "DeepInfra multipart image request",
+    );
     const multipartHeaders = Reflect.get(multipartRequest, "headers");
     expect(multipartHeaders).toBeInstanceOf(Headers);
     expect(Object.fromEntries((multipartHeaders as Headers).entries())).toEqual({

@@ -1,3 +1,4 @@
+// Delivery failure notification tests cover alerts emitted after delivery failures.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -38,6 +39,31 @@ vi.mock("../logging.js", () => ({
 
 const { sendFailureNotificationAnnounce } = await import("./delivery.js");
 
+type DeliveryRequest = {
+  abortSignal?: unknown;
+  accountId?: string;
+  bestEffort?: boolean;
+  cfg?: unknown;
+  channel?: string;
+  deps?: unknown;
+  identity?: unknown;
+  payloads?: unknown;
+  session?: unknown;
+  threadId?: number;
+  to?: string;
+};
+
+type WarnMeta = { channel?: string; err?: string; to?: string };
+
+function firstDeliveryRequest() {
+  const [deliveryRequest] = mocks.deliverOutboundPayloads.mock.calls[0] as [DeliveryRequest];
+  return deliveryRequest;
+}
+
+function firstWarnCall() {
+  return mocks.warn.mock.calls[0] as [WarnMeta, string];
+}
+
 describe("sendFailureNotificationAnnounce", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -69,32 +95,23 @@ describe("sendFailureNotificationAnnounce", () => {
       "Cron failed",
     );
 
-    expect(mocks.resolveDeliveryTarget).toHaveBeenCalledWith(cfg, "main", {
-      channel: "telegram",
-      to: "123",
-      accountId: "bot-a",
-    });
+    expect(mocks.resolveDeliveryTarget).toHaveBeenCalledWith(
+      cfg,
+      "main",
+      {
+        channel: "telegram",
+        to: "123",
+        accountId: "bot-a",
+      },
+      undefined,
+    );
     expect(mocks.buildOutboundSessionContext).toHaveBeenCalledWith({
       cfg,
       agentId: "main",
       sessionKey: "cron:job-1:failure",
     });
     expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(1);
-    const [deliveryRequest] = mocks.deliverOutboundPayloads.mock.calls[0] as [
-      {
-        abortSignal?: unknown;
-        accountId?: string;
-        bestEffort?: boolean;
-        cfg?: unknown;
-        channel?: string;
-        deps?: unknown;
-        identity?: unknown;
-        payloads?: unknown;
-        session?: unknown;
-        threadId?: number;
-        to?: string;
-      },
-    ];
+    const deliveryRequest = firstDeliveryRequest();
     expect(deliveryRequest.cfg).toBe(cfg);
     expect(deliveryRequest.channel).toBe("telegram");
     expect(deliveryRequest.to).toBe("123");
@@ -121,17 +138,50 @@ describe("sendFailureNotificationAnnounce", () => {
       "Cron failed",
     );
 
-    expect(mocks.resolveDeliveryTarget).toHaveBeenCalledWith({} as never, "main", {
-      channel: "telegram",
-      to: undefined,
-      accountId: undefined,
-      sessionKey: "agent:main:telegram:direct:123:thread:99",
-    });
+    expect(mocks.resolveDeliveryTarget).toHaveBeenCalledWith(
+      {} as never,
+      "main",
+      {
+        channel: "telegram",
+        to: undefined,
+        accountId: undefined,
+        sessionKey: "agent:main:telegram:direct:123:thread:99",
+      },
+      undefined,
+    );
     expect(mocks.buildOutboundSessionContext).toHaveBeenCalledWith({
       cfg: {},
       agentId: "main",
       sessionKey: "agent:main:telegram:direct:123:thread:99",
     });
+  });
+
+  it("can suppress session-thread inheritance for explicit failure destinations", async () => {
+    await sendFailureNotificationAnnounce(
+      {} as never,
+      {} as never,
+      "main",
+      "job-1",
+      {
+        channel: "telegram",
+        to: "-1001234567890",
+        sessionKey: "agent:main:telegram:group:-1001234567890:thread:42",
+        inheritSessionThread: false,
+      },
+      "Cron failed",
+    );
+
+    expect(mocks.resolveDeliveryTarget).toHaveBeenCalledWith(
+      {},
+      "main",
+      {
+        channel: "telegram",
+        to: "-1001234567890",
+        accountId: undefined,
+        sessionKey: "agent:main:telegram:group:-1001234567890:thread:42",
+      },
+      { inheritSessionThread: false },
+    );
   });
 
   it("does not send when target resolution fails", async () => {
@@ -171,10 +221,7 @@ describe("sendFailureNotificationAnnounce", () => {
     ).resolves.toBeUndefined();
 
     expect(mocks.warn).toHaveBeenCalledTimes(1);
-    const [warnMeta, warnMessage] = mocks.warn.mock.calls[0] as [
-      { channel?: string; err?: string; to?: string },
-      string,
-    ];
+    const [warnMeta, warnMessage] = firstWarnCall();
     expect(warnMeta.err).toBe("send failed");
     expect(warnMeta.channel).toBe("telegram");
     expect(warnMeta.to).toBe("123");

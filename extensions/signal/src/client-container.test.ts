@@ -1,4 +1,6 @@
+// Signal tests cover client container plugin behavior.
 import * as fetchModule from "openclaw/plugin-sdk/fetch-runtime";
+import { MAX_TIMER_TIMEOUT_MS } from "openclaw/plugin-sdk/number-runtime";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   containerCheck,
@@ -15,15 +17,34 @@ import {
 
 // spyOn approach works with vitest forks pool for cross-directory imports
 const mockFetch = vi.fn();
+
+// Build a Response-like `body` stream from a string so the production code exercises the
+// bounded body readers (readProviderTextResponse / readResponseTextLimited) instead of an
+// unbounded res.text(). Kept local to this file to avoid touching shared HTTP test mocks.
+function bodyStream(text: string): { body: ReadableStream<Uint8Array> } {
+  const bytes = new TextEncoder().encode(text);
+  return {
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (bytes.byteLength > 0) {
+          controller.enqueue(bytes);
+        }
+        controller.close();
+      },
+    }),
+  };
+}
 const wsMockState = vi.hoisted(() => ({
   behavior: "close" as "close" | "open" | "error" | "unexpected-response",
   urls: [] as string[],
+  options: [] as Array<{ maxPayload?: number } | undefined>,
 }));
 
 beforeEach(() => {
   vi.spyOn(fetchModule, "resolveFetch").mockReturnValue(mockFetch as unknown as typeof fetch);
   wsMockState.behavior = "close";
   wsMockState.urls = [];
+  wsMockState.options = [];
 });
 
 function requireFetchCall(index = 0): [RequestInfo | URL, RequestInit] {
@@ -57,7 +78,7 @@ function parseFetchBody(index = 0): Record<string, unknown> {
 
 function expectMockLogNotContains(mock: ReturnType<typeof vi.fn>, expected: string): void {
   const messages = mock.mock.calls.map((call) => String(call[0] ?? ""));
-  expect(messages.every((message) => !message.includes(expected))).toBe(true);
+  expect(messages.join("\n")).not.toContain(expected);
 }
 
 // Minimal WebSocket mock for connection-log assertions.
@@ -65,8 +86,9 @@ vi.mock("ws", () => ({
   default: class MockWebSocket {
     private handlers = new Map<string, Array<(...args: unknown[]) => void>>();
 
-    constructor(url: string | URL) {
+    constructor(url: string | URL, options?: { maxPayload?: number }) {
       wsMockState.urls.push(String(url));
+      wsMockState.options.push(options);
       setTimeout(() => {
         if (wsMockState.behavior === "open") {
           this.emit("open");
@@ -128,6 +150,22 @@ describe("containerCheck", () => {
     expectFirstFetchCall("http://localhost:8080/v1/about", "GET");
   });
 
+  it("cancels /v1/about response bodies after simple health checks", async () => {
+    const cancel = vi.fn(async () => undefined);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { cancel },
+    });
+
+    await expect(containerCheck("http://localhost:8080")).resolves.toEqual({
+      ok: true,
+      status: 200,
+      error: null,
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
   it("returns ok:false when /v1/about returns 404", async () => {
     mockFetch.mockResolvedValue({
       ok: false,
@@ -167,6 +205,7 @@ describe("containerCheck", () => {
 
     expect(result).toEqual({ ok: true, status: 101, error: null });
     expect(wsMockState.urls).toEqual(["ws://localhost:8080/v1/receive/%2B14259798283"]);
+    expect(wsMockState.options).toEqual([{ maxPayload: 1024 * 1024 }]);
   });
 
   it("rejects container receive endpoints that do not upgrade to WebSocket", async () => {
@@ -181,6 +220,19 @@ describe("containerCheck", () => {
       error: "Signal container receive endpoint did not upgrade to WebSocket (HTTP 200)",
     });
   });
+
+  it("rejects container receive endpoints that close before opening", async () => {
+    wsMockState.behavior = "close";
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+
+    const result = await containerCheck("http://localhost:8080", 1000, "+14259798283");
+
+    expect(result).toEqual({
+      ok: false,
+      status: null,
+      error: "Signal container receive WebSocket closed before open (1000: done)",
+    });
+  });
 });
 
 describe("containerRestRequest", () => {
@@ -192,7 +244,7 @@ describe("containerRestRequest", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ version: "1.0" }),
+      ...bodyStream(JSON.stringify({ version: "1.0" })),
     });
 
     const result = await containerRestRequest("/v1/about", { baseUrl: "http://localhost:8080" });
@@ -205,7 +257,7 @@ describe("containerRestRequest", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 201,
-      text: async () => "",
+      ...bodyStream(""),
     });
 
     await containerRestRequest("/v2/send", { baseUrl: "http://localhost:8080" }, "POST", {
@@ -228,7 +280,7 @@ describe("containerRestRequest", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 201,
-      text: async () => JSON.stringify({ timestamp: 1700000000000 }),
+      ...bodyStream(JSON.stringify({ timestamp: 1700000000000 })),
     });
 
     const result = await containerRestRequest(
@@ -258,7 +310,7 @@ describe("containerRestRequest", () => {
       ok: false,
       status: 500,
       statusText: "Internal Server Error",
-      text: async () => "Server error details",
+      ...bodyStream("Server error details"),
     });
 
     await expect(
@@ -270,7 +322,7 @@ describe("containerRestRequest", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => "",
+      ...bodyStream(""),
     });
 
     const result = await containerRestRequest("/v1/about", { baseUrl: "http://localhost:8080" });
@@ -281,14 +333,39 @@ describe("containerRestRequest", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => "{}",
+      ...bodyStream("{}"),
     });
 
     await containerRestRequest("/v1/about", { baseUrl: "http://localhost:8080", timeoutMs: 5000 });
 
     // The timeout is enforced via AbortController, so we verify the call was made with a signal
     expect(mockFetch).toHaveBeenCalled();
-    expect(requireFetchCall()[1].signal).toBeDefined();
+    if (requireFetchCall()[1].signal === undefined) {
+      throw new Error("expected fetch call to include an abort signal");
+    }
+  });
+
+  it("caps oversized REST request timeouts before arming abort timers", async () => {
+    const timeoutSpy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockReturnValue(0 as unknown as ReturnType<typeof setTimeout>);
+    try {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        ...bodyStream("{}"),
+      });
+
+      await containerRestRequest("/v1/about", {
+        baseUrl: "http://localhost:8080",
+        timeoutMs: Number.MAX_SAFE_INTEGER,
+      });
+
+      expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), MAX_TIMER_TIMEOUT_MS);
+      expect(requireFetchCall()[1].signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   });
 });
 
@@ -301,7 +378,7 @@ describe("containerSendMessage", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ timestamp: "1700000000000" }),
+      ...bodyStream(JSON.stringify({ timestamp: "1700000000000" })),
     });
 
     const result = await containerSendMessage({
@@ -326,7 +403,7 @@ describe("containerSendMessage", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ timestamp: "not-a-number" }),
+      ...bodyStream(JSON.stringify({ timestamp: "not-a-number" })),
     });
 
     await expect(
@@ -339,11 +416,31 @@ describe("containerSendMessage", () => {
     ).rejects.toThrow("Signal REST send returned invalid timestamp");
   });
 
+  it.each(["0x18bcfe56800", "1700000000000.5"])(
+    "rejects non-decimal integer send timestamp %s",
+    async (timestamp) => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        ...bodyStream(JSON.stringify({ timestamp })),
+      });
+
+      await expect(
+        containerSendMessage({
+          baseUrl: "http://localhost:8080",
+          account: "+14259798283",
+          recipients: ["+15550001111"],
+          message: "Hello world",
+        }),
+      ).rejects.toThrow("Signal REST send returned invalid timestamp");
+    },
+  );
+
   it("uses container styled text mode when styles are provided", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({}),
+      ...bodyStream(JSON.stringify({})),
     });
 
     await containerSendMessage({
@@ -364,7 +461,7 @@ describe("containerSendMessage", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({}),
+      ...bodyStream(JSON.stringify({})),
     });
 
     await containerSendMessage({
@@ -375,8 +472,7 @@ describe("containerSendMessage", () => {
       textStyles: [{ start: 0, length: 4, style: "BOLD" }],
     });
 
-    const callArgs = mockFetch.mock.calls[0];
-    const body = JSON.parse(callArgs[1].body);
+    const body = parseFetchBody();
     expect(body.message).toBe("**Bold** \\* not italic");
   });
 
@@ -384,7 +480,7 @@ describe("containerSendMessage", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({}),
+      ...bodyStream(JSON.stringify({})),
     });
 
     await containerSendMessage({
@@ -395,8 +491,7 @@ describe("containerSendMessage", () => {
       textStyles: [{ start: 0, length: 4, style: "BOLD" }],
     });
 
-    const callArgs = mockFetch.mock.calls[0];
-    const body = JSON.parse(callArgs[1].body);
+    const body = parseFetchBody();
     expect(body.message).toBe("**Bold** C:\\Temp\\file and /foo\\bar/");
   });
 
@@ -414,7 +509,7 @@ describe("containerSendMessage", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({}),
+      ...bodyStream(JSON.stringify({})),
     });
 
     await containerSendMessage({
@@ -425,10 +520,11 @@ describe("containerSendMessage", () => {
       attachments: [tmpFile],
     });
 
-    const callArgs = mockFetch.mock.calls[0];
-    const body = JSON.parse(callArgs[1].body);
+    const body = parseFetchBody();
     expect(body.attachments).toBeUndefined();
-    expect(body.base64_attachments).toBeDefined();
+    if (!Array.isArray(body.base64_attachments)) {
+      throw new Error("expected base64 attachments array");
+    }
     expect(body.base64_attachments).toHaveLength(1);
     expect(body.base64_attachments[0]).toMatch(
       /^data:image\/jpeg;filename=test-image\.jpg;base64,/,
@@ -576,9 +672,11 @@ describe("containerFetchAttachment", () => {
   });
 
   it("returns null on non-ok response", async () => {
+    const cancel = vi.fn(async () => undefined);
     mockFetch.mockResolvedValue({
       ok: false,
       status: 404,
+      body: { cancel },
     });
 
     const result = await containerFetchAttachment("attachment-123", {
@@ -586,6 +684,7 @@ describe("containerFetchAttachment", () => {
     });
 
     expect(result).toBeNull();
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it("encodes attachment ID in URL", async () => {
@@ -617,6 +716,24 @@ describe("containerFetchAttachment", () => {
         maxResponseBytes: 4,
       }),
     ).rejects.toThrow("Signal REST attachment exceeded size limit");
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed content-length before reading attachments", async () => {
+    const arrayBuffer = vi.fn();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-length": "0x3" }),
+      arrayBuffer,
+    });
+
+    await expect(
+      containerFetchAttachment("attachment-123", {
+        baseUrl: "http://localhost:8080",
+        maxResponseBytes: 4,
+      }),
+    ).rejects.toThrow("invalid content-length header: 0x3");
     expect(arrayBuffer).not.toHaveBeenCalled();
   });
 
@@ -703,7 +820,7 @@ describe("containerRestRequest edge cases", () => {
       ok: false,
       status: 500,
       statusText: "Internal Server Error",
-      text: async () => "",
+      ...bodyStream(""),
     });
 
     await expect(
@@ -715,12 +832,102 @@ describe("containerRestRequest edge cases", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => "not-valid-json",
+      ...bodyStream("not-valid-json"),
     });
 
     await expect(
       containerRestRequest("/v1/about", { baseUrl: "http://localhost:8080" }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("Signal REST returned malformed JSON");
+  });
+
+  it("fails closed when the success body exceeds the response size cap", async () => {
+    // Drive the real bounded reader with a >16 MiB stream. Pull lazily so the cap
+    // (16 MiB) trips and cancels the stream long before 20 MiB is materialized.
+    const ONE_MIB = new Uint8Array(1024 * 1024);
+    let emitted = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (emitted >= 20) {
+          controller.close();
+          return;
+        }
+        emitted += 1;
+        controller.enqueue(ONE_MIB);
+      },
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: stream,
+    });
+
+    await expect(
+      containerRestRequest("/v1/about", { baseUrl: "http://localhost:8080" }),
+    ).rejects.toThrow(/exceeds \d+ bytes/);
+    // The stream must have been cancelled at the cap, not drained to completion.
+    expect(emitted).toBeLessThan(20);
+  });
+
+  it("bounds the error body so a huge failure response cannot be buffered whole", async () => {
+    const HUGE = "x".repeat(1024 * 1024); // 1 MiB of error text
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      ...bodyStream(HUGE),
+    });
+
+    await containerRestRequest("/v2/send", { baseUrl: "http://localhost:8080" }, "POST").then(
+      () => {
+        throw new Error("expected containerRestRequest to reject");
+      },
+      (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        expect(message.startsWith("Signal REST 500:")).toBe(true);
+        // readResponseTextLimited truncates the diagnostic body well below the 1 MiB payload.
+        expect(message.length).toBeLessThan(64 * 1024);
+      },
+    );
+  });
+
+  it("parses a large but under-cap success body without truncation", async () => {
+    // Regression guard: a legitimate multi-MiB JSON response (well under the 16 MiB
+    // cap) must still be read in full and parsed intact — the bound must not clip
+    // valid container payloads. Build ~4 MiB of real JSON.
+    const items = Array.from({ length: 50_000 }, (_, i) => ({
+      id: i,
+      note: "signal-container-payload-entry",
+    }));
+    const payload = JSON.stringify({ items });
+    expect(payload.length).toBeGreaterThan(2 * 1024 * 1024);
+    expect(payload.length).toBeLessThan(16 * 1024 * 1024);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      ...bodyStream(payload),
+    });
+
+    const result = await containerRestRequest<{ items: Array<{ id: number }> }>("/v1/about", {
+      baseUrl: "http://localhost:8080",
+    });
+    // Full body round-trips: first and last entries survive, count is exact.
+    expect(result.items).toHaveLength(50_000);
+    expect(result.items[0]?.id).toBe(0);
+    expect(result.items[49_999]?.id).toBe(49_999);
+  });
+
+  it("returns undefined for an empty success body via the bounded reader", async () => {
+    // The bounded reader must preserve the existing empty-body -> undefined contract
+    // (no spurious JSON.parse("") throw) so well-behaved 200/empty responses are unchanged.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      ...bodyStream(""),
+    });
+
+    const result = await containerRestRequest("/v1/about", { baseUrl: "http://localhost:8080" });
+    expect(result).toBeUndefined();
   });
 });
 
@@ -742,6 +949,7 @@ describe("streamContainerEvents", () => {
     expect(log).toHaveBeenCalledWith(
       "[signal-ws] connecting to ws://localhost:8080/v1/receive/<redacted>",
     );
+    expect(wsMockState.options).toEqual([{ maxPayload: 1024 * 1024 }]);
     expectMockLogNotContains(log, "+14259798283");
     expectMockLogNotContains(log, "%2B14259798283");
   });
@@ -773,7 +981,7 @@ describe("containerSendReaction", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ timestamp: 1700000000000 }),
+      ...bodyStream(JSON.stringify({ timestamp: 1700000000000 })),
     });
 
     const result = await containerSendReaction({
@@ -783,6 +991,7 @@ describe("containerSendReaction", () => {
       emoji: "👍",
       targetAuthor: "+15550001111",
       targetTimestamp: 1699999999999,
+      groupId: "group-123",
     });
 
     expect(result).toEqual({ timestamp: 1700000000000 });
@@ -793,29 +1002,9 @@ describe("containerSendReaction", () => {
         reaction: "👍",
         target_author: "+15550001111",
         timestamp: 1699999999999,
+        group_id: "group-123",
       }),
     );
-  });
-
-  it("includes group_id when provided", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({}),
-    });
-
-    await containerSendReaction({
-      baseUrl: "http://localhost:8080",
-      account: "+14259798283",
-      recipient: "+15550001111",
-      emoji: "❤️",
-      targetAuthor: "+15550001111",
-      targetTimestamp: 1699999999999,
-      groupId: "group-123",
-    });
-
-    const body = parseFetchBody();
-    expect(body.group_id).toBe("group-123");
   });
 });
 
@@ -828,7 +1017,7 @@ describe("containerRpcRequest reactions", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({}),
+      ...bodyStream(JSON.stringify({})),
     });
 
     await containerRpcRequest(
@@ -860,7 +1049,7 @@ describe("containerRemoveReaction", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ timestamp: 1700000000000 }),
+      ...bodyStream(JSON.stringify({ timestamp: 1700000000000 })),
     });
 
     const result = await containerRemoveReaction({
@@ -870,6 +1059,7 @@ describe("containerRemoveReaction", () => {
       emoji: "👍",
       targetAuthor: "+15550001111",
       targetTimestamp: 1699999999999,
+      groupId: "group-123",
     });
 
     expect(result).toEqual({ timestamp: 1700000000000 });
@@ -883,28 +1073,8 @@ describe("containerRemoveReaction", () => {
         reaction: "👍",
         target_author: "+15550001111",
         timestamp: 1699999999999,
+        group_id: "group-123",
       }),
     );
-  });
-
-  it("includes group_id when provided", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({}),
-    });
-
-    await containerRemoveReaction({
-      baseUrl: "http://localhost:8080",
-      account: "+14259798283",
-      recipient: "+15550001111",
-      emoji: "❤️",
-      targetAuthor: "+15550001111",
-      targetTimestamp: 1699999999999,
-      groupId: "group-123",
-    });
-
-    const body = parseFetchBody();
-    expect(body.group_id).toBe("group-123");
   });
 });

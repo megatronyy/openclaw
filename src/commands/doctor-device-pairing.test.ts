@@ -1,3 +1,4 @@
+// Doctor device pairing tests cover device-pairing checks, repair prompts, and diagnostics.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,11 +23,44 @@ vi.mock("../gateway/call.js", () => ({
   callGateway: (...args: unknown[]) => callGatewayMock(...args),
 }));
 
-vi.mock("../terminal/note.js", () => ({
+vi.mock("../../packages/terminal-core/src/note.js", () => ({
   note: (...args: unknown[]) => noteMock(...args),
 }));
 
+function requireMockCall(
+  mock: { mock: { calls: unknown[][] } },
+  callIndex: number,
+  label: string,
+): unknown[] {
+  const call = mock.mock.calls[callIndex];
+  if (!call) {
+    throw new Error(`expected ${label} call ${callIndex}`);
+  }
+  return call;
+}
+
+function requireNoteMessage(callIndex = 0): string {
+  const [message] = requireMockCall(noteMock, callIndex, "doctor note");
+  if (typeof message !== "string") {
+    throw new Error(`expected doctor note message ${callIndex}`);
+  }
+  return message;
+}
+
+function requireNoteTitle(callIndex = 0): unknown {
+  const [, title] = requireMockCall(noteMock, callIndex, "doctor note");
+  return title;
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    throw new Error(`expected ${label} record`);
+  }
+  return value as Record<string, unknown>;
+}
+
 describe("noteDevicePairingHealth", () => {
+  let collectDevicePairingHealthFindings: typeof import("./doctor-device-pairing.js").collectDevicePairingHealthFindings;
   let noteDevicePairingHealth: typeof import("./doctor-device-pairing.js").noteDevicePairingHealth;
 
   async function withApprovedOperatorPairing(
@@ -69,7 +103,8 @@ describe("noteDevicePairingHealth", () => {
     vi.resetModules();
     callGatewayMock.mockReset();
     noteMock.mockReset();
-    ({ noteDevicePairingHealth } = await import("./doctor-device-pairing.js"));
+    ({ collectDevicePairingHealthFindings, noteDevicePairingHealth } =
+      await import("./doctor-device-pairing.js"));
   });
 
   afterEach(() => {
@@ -79,7 +114,7 @@ describe("noteDevicePairingHealth", () => {
 
   it("warns about pending scope upgrades from local pairing state when the gateway is down", async () => {
     await withApprovedOperatorPairing(async ({ identity, publicKey }) => {
-      await requestDevicePairing({
+      const pending = await requestDevicePairing({
         deviceId: identity.deviceId,
         publicKey,
         role: "operator",
@@ -95,11 +130,27 @@ describe("noteDevicePairingHealth", () => {
       });
 
       expect(noteMock).toHaveBeenCalledTimes(1);
-      const message = String(noteMock.mock.calls[0]?.[0] ?? "");
-      expect(noteMock.mock.calls[0]?.[1]).toBe("Device pairing");
+      const message = requireNoteMessage();
+      expect(requireNoteTitle()).toBe("Device pairing");
       expect(message).toContain("Pending scope upgrade");
       expect(message).toContain("operator.admin");
       expect(message).toContain("openclaw devices approve");
+      expect(callGatewayMock).not.toHaveBeenCalled();
+
+      const findings = await collectDevicePairingHealthFindings({
+        cfg: { gateway: { mode: "local" } },
+      });
+      expect(findings).toEqual([
+        expect.objectContaining({
+          checkId: "core/doctor/device-pairing",
+          severity: "warning",
+          path: "devices.pending",
+          target: identity.deviceId + ":" + pending.request.requestId,
+          requirement: "scope-upgrade",
+          message: expect.stringContaining("Pending scope upgrade"),
+          fixHint: expect.stringContaining("openclaw devices approve"),
+        }),
+      ]);
       expect(callGatewayMock).not.toHaveBeenCalled();
     });
   });
@@ -122,10 +173,24 @@ describe("noteDevicePairingHealth", () => {
           });
 
           expect(noteMock).toHaveBeenCalledTimes(1);
-          const message = String(noteMock.mock.calls[0]?.[0] ?? "");
-          expect(noteMock.mock.calls[0]?.[1]).toBe("Device pairing");
+          const message = requireNoteMessage();
+          expect(requireNoteTitle()).toBe("Device pairing");
           expect(message).toContain("paired.json");
           expect(message).toContain("refused to treat it as empty");
+          expect(await fs.readFile(pairedPath, "utf8")).toBe("{not-json}");
+
+          const findings = await collectDevicePairingHealthFindings({
+            cfg: { gateway: { mode: "local" } },
+          });
+          expect(findings).toEqual([
+            expect.objectContaining({
+              checkId: "core/doctor/device-pairing",
+              severity: "warning",
+              path: pairedPath,
+              requirement: "pairing-store-parse",
+              message: expect.stringContaining("refused to treat it as empty"),
+            }),
+          ]);
           expect(await fs.readFile(pairedPath, "utf8")).toBe("{not-json}");
         },
       );
@@ -164,7 +229,7 @@ describe("noteDevicePairingHealth", () => {
       });
 
       expect(noteMock).toHaveBeenCalledTimes(1);
-      const message = String(noteMock.mock.calls[0]?.[0] ?? "");
+      const message = requireNoteMessage();
       expect(message).toContain("stale device-token pattern");
       expect(message).toContain("openclaw devices rotate");
     });
@@ -185,7 +250,7 @@ describe("noteDevicePairingHealth", () => {
       });
 
       expect(noteMock).toHaveBeenCalledTimes(1);
-      const message = String(noteMock.mock.calls[0]?.[0] ?? "");
+      const message = requireNoteMessage();
       expect(message).toContain("Local cached node device auth");
       expect(message).toContain("role is no longer approved");
       expect(message).toContain("remove the stale cached node auth entry");
@@ -219,10 +284,11 @@ describe("noteDevicePairingHealth", () => {
     });
 
     expect(callGatewayMock).toHaveBeenCalledOnce();
-    const [gatewayRequest] = callGatewayMock.mock.calls[0] ?? [];
+    const [rawGatewayRequest] = requireMockCall(callGatewayMock, 0, "gateway call");
+    const gatewayRequest = requireRecord(rawGatewayRequest, "gateway request");
     expect(gatewayRequest?.method).toBe("device.pair.list");
     expect(noteMock).toHaveBeenCalledTimes(1);
-    expect(String(noteMock.mock.calls[0]?.[0] ?? "")).toContain("req-gateway-1");
+    expect(requireNoteMessage()).toContain("req-gateway-1");
   });
 
   it("sanitizes device labels before printing doctor notes", async () => {
@@ -250,7 +316,7 @@ describe("noteDevicePairingHealth", () => {
       healthOk: true,
     });
 
-    const message = String(noteMock.mock.calls[0]?.[0] ?? "");
+    const message = requireNoteMessage();
     expect(message).toContain("bad\\nname");
     expect(message).not.toContain("\u001b");
     expect(message).not.toContain("control-ui\tclient");
@@ -296,7 +362,7 @@ describe("noteDevicePairingHealth", () => {
       healthOk: true,
     });
 
-    const message = String(noteMock.mock.calls[0]?.[0] ?? "");
+    const message = requireNoteMessage();
     expect(message).toContain("openclaw devices remove 'device; echo pwn'");
     expect(message).toContain(
       "openclaw devices rotate --device 'device; echo pwn' --role 'operator; touch /tmp/pwn'",
@@ -321,7 +387,7 @@ describe("noteDevicePairingHealth", () => {
         healthOk: false,
       });
 
-      const message = String(noteMock.mock.calls[0]?.[0] ?? "");
+      const message = requireNoteMessage();
       expect(message).toContain("has no active operator device token");
       expect(message).not.toContain("no longer has a matching active gateway token");
     });

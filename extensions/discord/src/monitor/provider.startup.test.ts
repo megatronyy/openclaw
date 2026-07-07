@@ -1,3 +1,4 @@
+// Discord tests cover provider.startup plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Client, Plugin } from "../internal/discord.js";
 
@@ -151,6 +152,14 @@ describe("createDiscordMonitorClient", () => {
     };
   }
 
+  function firstCreateClientCall(createClient: { mock: { calls: unknown[][] } }) {
+    const [call] = createClient.mock.calls;
+    if (!call) {
+      throw new Error("expected Discord client creation call");
+    }
+    return call;
+  }
+
   it("registers voice plugin listeners after gateway setup", async () => {
     const gatewayPlugin = {
       id: "gateway",
@@ -240,13 +249,15 @@ describe("createDiscordMonitorClient", () => {
     });
 
     expect(createClient).toHaveBeenCalledTimes(1);
-    const [options, handlers, plugins] = createClient.mock.calls[0] ?? [];
-    expect(options?.requestOptions).toEqual({
+    const [options, handlers, plugins] = firstCreateClientCall(createClient);
+    expect((options as { requestOptions?: unknown } | undefined)?.requestOptions).toEqual({
       timeout: DISCORD_REST_TIMEOUT_MS,
       runtimeProfile: "persistent",
       maxQueueSize: 1000,
     });
-    expect(handlers).toBeDefined();
+    if (!handlers) {
+      throw new Error("expected Discord client handlers");
+    }
     expect(Array.isArray(plugins)).toBe(true);
   });
 
@@ -273,14 +284,16 @@ describe("createDiscordMonitorClient", () => {
     });
 
     expect(createClient).toHaveBeenCalledTimes(1);
-    const [options, handlers, plugins] = createClient.mock.calls[0] ?? [];
-    expect(options?.requestOptions).toEqual({
+    const [options, handlers, plugins] = firstCreateClientCall(createClient);
+    expect((options as { requestOptions?: unknown } | undefined)?.requestOptions).toEqual({
       timeout: DISCORD_REST_TIMEOUT_MS,
       runtimeProfile: "persistent",
       maxQueueSize: 1000,
       fetch: restFetch,
     });
-    expect(handlers).toBeDefined();
+    if (!handlers) {
+      throw new Error("expected Discord client handlers");
+    }
     expect(Array.isArray(plugins)).toBe(true);
   });
 

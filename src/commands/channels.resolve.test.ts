@@ -1,3 +1,4 @@
+// Channels resolve tests cover channel/account selection and command output for message routing.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { channelsResolveCommand } from "./channels/resolve.js";
 
@@ -22,12 +23,16 @@ vi.mock("../cli/command-secret-targets.js", () => ({
   getChannelsCommandSecretTargetIds: mocks.getChannelsCommandSecretTargetIds,
 }));
 
-vi.mock("../config/config.js", () => ({
-  getRuntimeConfig: mocks.loadConfig,
-  loadConfig: mocks.loadConfig,
-  readConfigFileSnapshot: mocks.readConfigFileSnapshot,
-  replaceConfigFile: mocks.replaceConfigFile,
-}));
+vi.mock("../config/config.js", async () => {
+  const actual = await vi.importActual<typeof import("../config/config.js")>("../config/config.js");
+  return {
+    ...actual,
+    getRuntimeConfig: mocks.loadConfig,
+    loadConfig: mocks.loadConfig,
+    readConfigFileSnapshot: mocks.readConfigFileSnapshot,
+    replaceConfigFile: mocks.replaceConfigFile,
+  };
+});
 
 vi.mock("../cli/plugins-registry-refresh.js", () => ({
   refreshPluginRegistryAfterConfigMutation: mocks.refreshPluginRegistryAfterConfigMutation,
@@ -48,6 +53,24 @@ vi.mock("./channel-setup/channel-plugin-resolution.js", () => ({
 vi.mock("../channels/plugins/index.js", () => ({
   getChannelPlugin: mocks.getChannelPlugin,
 }));
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`expected ${label}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireFirstMockArg(
+  mock: { mock: { calls: unknown[][] } },
+  label: string,
+): Record<string, unknown> {
+  const [call] = mock.mock.calls;
+  if (!call) {
+    throw new Error(`expected ${label} call`);
+  }
+  return requireRecord(call[0], `${label} request`);
+}
 
 describe("channelsResolveCommand", () => {
   const runtime = {
@@ -103,16 +126,19 @@ describe("channelsResolveCommand", () => {
     );
 
     expect(mocks.resolveInstallableChannelPlugin).toHaveBeenCalledTimes(1);
-    const pluginResolutionRequest = mocks.resolveInstallableChannelPlugin.mock.calls[0]?.[0];
-    expect(pluginResolutionRequest?.rawChannel).toBe("whatsapp");
-    expect(pluginResolutionRequest?.allowInstall).toBe(false);
+    const pluginResolutionRequest = requireFirstMockArg(
+      mocks.resolveInstallableChannelPlugin,
+      "installable channel resolution",
+    );
+    expect(pluginResolutionRequest.rawChannel).toBe("whatsapp");
+    expect(pluginResolutionRequest.allowInstall).toBe(false);
     expect(mocks.replaceConfigFile).not.toHaveBeenCalled();
     expect(mocks.refreshPluginRegistryAfterConfigMutation).not.toHaveBeenCalled();
     expect(resolveTargets).toHaveBeenCalledTimes(1);
-    const resolveRequest = resolveTargets.mock.calls[0]?.[0];
-    expect(resolveRequest?.cfg).toStrictEqual({ channels: {} });
-    expect(resolveRequest?.inputs).toStrictEqual(["friends"]);
-    expect(resolveRequest?.kind).toBe("group");
+    const resolveRequest = requireFirstMockArg(resolveTargets, "target resolution");
+    expect(resolveRequest.cfg).toStrictEqual({ channels: {} });
+    expect(resolveRequest.inputs).toStrictEqual(["friends"]);
+    expect(resolveRequest.kind).toBe("group");
     expect(runtime.log).toHaveBeenCalledWith("friends -> 120363000000@g.us (Friends)");
   });
 
@@ -182,9 +208,9 @@ describe("channelsResolveCommand", () => {
       channel: null,
     });
     expect(resolveTargets).toHaveBeenCalledTimes(1);
-    const resolveRequest = resolveTargets.mock.calls[0]?.[0];
-    expect(resolveRequest?.cfg).toBe(autoEnabledConfig);
-    expect(resolveRequest?.inputs).toStrictEqual(["friends"]);
-    expect(resolveRequest?.kind).toBe("group");
+    const resolveRequest = requireFirstMockArg(resolveTargets, "target resolution");
+    expect(resolveRequest.cfg).toBe(autoEnabledConfig);
+    expect(resolveRequest.inputs).toStrictEqual(["friends"]);
+    expect(resolveRequest.kind).toBe("group");
   });
 });

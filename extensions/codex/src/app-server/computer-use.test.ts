@@ -1,3 +1,4 @@
+// Codex tests cover computer use plugin behavior.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,8 +36,6 @@ async function expectSetupErrorStatus(
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  expect(typeof value).toBe("object");
-  expect(value).not.toBeNull();
   if (typeof value !== "object" || value === null) {
     throw new Error(`${label} was not an object`);
   }
@@ -50,7 +49,7 @@ function requestCalls(
 }
 
 function expectRequestMethodNotCalled(request: CodexComputerUseRequest, method: string): void {
-  expect(requestCalls(request).some(([calledMethod]) => calledMethod === method)).toBe(false);
+  expect(requestCalls(request).map(([calledMethod]) => calledMethod)).not.toContain(method);
 }
 
 describe("Codex Computer Use setup", () => {

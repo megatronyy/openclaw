@@ -1,3 +1,4 @@
+// Register status/health/session tests cover status-related command registration.
 import { Command } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerStatusHealthSessionsCommands } from "./register.status-health-sessions.js";
@@ -7,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   healthCommand: vi.fn(),
   sessionsCommand: vi.fn(),
   sessionsCleanupCommand: vi.fn(),
+  sessionsTailCommand: vi.fn(),
+  sessionsCompactCommand: vi.fn(),
   exportTrajectoryCommand: vi.fn(),
   commitmentsListCommand: vi.fn(),
   commitmentsDismissCommand: vi.fn(),
@@ -31,6 +34,8 @@ const statusCommand = mocks.statusCommand;
 const healthCommand = mocks.healthCommand;
 const sessionsCommand = mocks.sessionsCommand;
 const sessionsCleanupCommand = mocks.sessionsCleanupCommand;
+const sessionsTailCommand = mocks.sessionsTailCommand;
+const sessionsCompactCommand = mocks.sessionsCompactCommand;
 const exportTrajectoryCommand = mocks.exportTrajectoryCommand;
 const commitmentsListCommand = mocks.commitmentsListCommand;
 const commitmentsDismissCommand = mocks.commitmentsDismissCommand;
@@ -51,14 +56,19 @@ type MockCalls = {
 };
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  expect(typeof value, label).toBe("object");
-  expect(value, label).not.toBeNull();
+  if (!value || typeof value !== "object") {
+    throw new Error(`expected ${label}`);
+  }
   return value as Record<string, unknown>;
 }
 
 function expectCommandOptions(command: MockCalls, expected: Record<string, unknown>) {
   expect(command.mock.calls).toHaveLength(1);
-  const [options, actualRuntime] = command.mock.calls[0] ?? [];
+  const call = command.mock.calls[0];
+  if (!call) {
+    throw new Error("expected command call");
+  }
+  const [options, actualRuntime] = call;
   expect(actualRuntime).toBe(runtime);
   const optionsRecord = requireRecord(options, "command options");
   for (const [key, value] of Object.entries(expected)) {
@@ -81,6 +91,14 @@ vi.mock("../../commands/sessions.js", () => ({
 
 vi.mock("../../commands/sessions-cleanup.js", () => ({
   sessionsCleanupCommand: mocks.sessionsCleanupCommand,
+}));
+
+vi.mock("../../commands/sessions-tail.js", () => ({
+  sessionsTailCommand: mocks.sessionsTailCommand,
+}));
+
+vi.mock("../../commands/sessions-compact.js", () => ({
+  sessionsCompactCommand: mocks.sessionsCompactCommand,
 }));
 
 vi.mock("../../commands/export-trajectory.js", () => ({
@@ -129,6 +147,8 @@ describe("registerStatusHealthSessionsCommands", () => {
     healthCommand.mockResolvedValue(undefined);
     sessionsCommand.mockResolvedValue(undefined);
     sessionsCleanupCommand.mockResolvedValue(undefined);
+    sessionsTailCommand.mockResolvedValue(undefined);
+    sessionsCompactCommand.mockResolvedValue(undefined);
     exportTrajectoryCommand.mockResolvedValue(undefined);
     commitmentsListCommand.mockResolvedValue(undefined);
     commitmentsDismissCommand.mockResolvedValue(undefined);
@@ -236,6 +256,126 @@ describe("registerStatusHealthSessionsCommands", () => {
     });
   });
 
+  it("dispatches sessions list as an alias for bare sessions (regression for #81139)", async () => {
+    await runCli(["sessions", "list"]);
+
+    expect(sessionsCommand).toHaveBeenCalledTimes(1);
+    expectCommandOptions(sessionsCommand, {
+      json: false,
+      allAgents: false,
+      agent: undefined,
+      store: undefined,
+    });
+  });
+
+  it("forwards sessions parent options through the list alias", async () => {
+    await runCli([
+      "sessions",
+      "--json",
+      "--verbose",
+      "--store",
+      "/tmp/sessions.json",
+      "--agent",
+      "work",
+      "--all-agents",
+      "--active",
+      "120",
+      "--limit",
+      "25",
+      "list",
+    ]);
+
+    expect(setVerbose).toHaveBeenCalledWith(true);
+    expectCommandOptions(sessionsCommand, {
+      json: true,
+      store: "/tmp/sessions.json",
+      agent: "work",
+      allAgents: true,
+      active: "120",
+      limit: "25",
+    });
+  });
+
+  it("inherits the parent sessions --agent for compact (regression #91378: wrong-agent compaction)", async () => {
+    await runCli(["sessions", "--agent", "work", "compact", "agent:work:main"]);
+
+    expectCommandOptions(sessionsCompactCommand, {
+      key: "agent:work:main",
+      agent: "work",
+    });
+  });
+
+  it("inherits the parent sessions --json for compact", async () => {
+    await runCli(["sessions", "--json", "compact", "agent:work:main"]);
+
+    expectCommandOptions(sessionsCompactCommand, {
+      key: "agent:work:main",
+      json: true,
+    });
+  });
+
+  it("prefers the compact-level --agent over the parent sessions --agent", async () => {
+    await runCli(["sessions", "--agent", "main", "compact", "agent:work:main", "--agent", "work"]);
+
+    expectCommandOptions(sessionsCompactCommand, {
+      key: "agent:work:main",
+      agent: "work",
+    });
+  });
+
+  it("rejects an inherited parent --store for compact instead of mutating a different store (regression #91378)", async () => {
+    await runCli(["sessions", "--store", "/tmp/other-sessions.json", "compact", "agent:work:main"]);
+
+    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("--store"));
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(sessionsCompactCommand).not.toHaveBeenCalled();
+  });
+
+  it("rejects other unsupported inherited parent list options for compact", async () => {
+    await runCli([
+      "sessions",
+      "--all-agents",
+      "--limit",
+      "25",
+      "--verbose",
+      "compact",
+      "agent:work:main",
+    ]);
+
+    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("--all-agents"));
+    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("--verbose"));
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(sessionsCompactCommand).not.toHaveBeenCalled();
+  });
+
+  it("forwards sessions list-side options", async () => {
+    await runCli([
+      "sessions",
+      "list",
+      "--json",
+      "--verbose",
+      "--store",
+      "/tmp/sessions.json",
+      "--agent",
+      "work",
+      "--all-agents",
+      "--active",
+      "120",
+      "--limit",
+      "25",
+    ]);
+
+    expect(setVerbose).toHaveBeenCalledWith(true);
+    expectCommandOptions(sessionsCommand, {
+      json: true,
+      store: "/tmp/sessions.json",
+      agent: "work",
+      allAgents: true,
+      active: "120",
+      limit: "25",
+    });
+  });
+
   it("runs sessions cleanup subcommand with forwarded options", async () => {
     await runCli([
       "sessions",
@@ -269,6 +409,31 @@ describe("registerStatusHealthSessionsCommands", () => {
 
     expectCommandOptions(sessionsCleanupCommand, {
       allAgents: true,
+    });
+  });
+
+  it("runs sessions tail with forwarded progress options", async () => {
+    await runCli([
+      "sessions",
+      "--store",
+      "/tmp/sessions.json",
+      "--agent",
+      "work",
+      "tail",
+      "--session-key",
+      "agent:main:telegram:direct:owner",
+      "--tail",
+      "5",
+      "--follow",
+    ]);
+
+    expectCommandOptions(sessionsTailCommand, {
+      sessionKey: "agent:main:telegram:direct:owner",
+      store: "/tmp/sessions.json",
+      agent: "work",
+      allAgents: false,
+      follow: true,
+      tail: "5",
     });
   });
 
@@ -358,6 +523,16 @@ describe("registerStatusHealthSessionsCommands", () => {
       code: "stale_running",
       limit: 5,
     });
+  });
+
+  it("rejects partially numeric tasks audit limits", async () => {
+    await runCli(["tasks", "--json", "audit", "--limit", "5abc"]);
+
+    expect(runtime.error).toHaveBeenCalledWith(
+      "--limit must be a positive integer, for example --limit 25.",
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(tasksAuditCommand).not.toHaveBeenCalled();
   });
 
   it("routes tasks flow commands through the TaskFlow handlers", async () => {

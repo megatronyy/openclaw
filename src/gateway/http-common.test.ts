@@ -1,3 +1,5 @@
+// HTTP common tests cover JSON/text response helpers, auth failures, security
+// headers, SSE headers, body parsing, and disconnect diagnostics.
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,7 +23,7 @@ import {
   watchClientDisconnect,
   writeDone,
 } from "./http-common.js";
-import { makeMockHttpResponse } from "./test-http-response.js";
+import { makeMockHttpReqRes, makeMockHttpResponse } from "./test-http-response.js";
 
 const readJsonBodyMock = vi.hoisted(() => vi.fn());
 
@@ -46,8 +48,17 @@ function expectHeaderNotSet(setHeader: ReturnType<typeof vi.fn>, name: string): 
 
 function mockCallRecord(mock: ReturnType<typeof vi.fn>, index: number): unknown[] {
   const call = mock.mock.calls[index];
-  expect(call).toBeTruthy();
-  return call ?? [];
+  if (!call) {
+    throw new Error(`Expected mock call ${index}`);
+  }
+  return call;
+}
+
+function expectUnauthorizedPayload(res: ServerResponse, end: ReturnType<typeof vi.fn>): void {
+  expect(res.statusCode).toBe(401);
+  expect(end).toHaveBeenCalledWith(
+    JSON.stringify({ error: { message: "Unauthorized", type: "unauthorized" } }),
+  );
 }
 
 describe("setDefaultSecurityHeaders", () => {
@@ -142,10 +153,7 @@ describe("sendUnauthorized", () => {
   it("responds with 401 and a structured unauthorized payload", () => {
     const { res, end } = makeMockHttpResponse();
     sendUnauthorized(res);
-    expect(res.statusCode).toBe(401);
-    expect(end).toHaveBeenCalledWith(
-      JSON.stringify({ error: { message: "Unauthorized", type: "unauthorized" } }),
-    );
+    expectUnauthorizedPayload(res, end);
   });
 });
 
@@ -201,10 +209,7 @@ describe("sendGatewayAuthFailure", () => {
     const { res, end } = makeMockHttpResponse();
     const authResult = { ok: false, rateLimited: false } as GatewayAuthResult;
     sendGatewayAuthFailure(res, authResult);
-    expect(res.statusCode).toBe(401);
-    expect(end).toHaveBeenCalledWith(
-      JSON.stringify({ error: { message: "Unauthorized", type: "unauthorized" } }),
-    );
+    expectUnauthorizedPayload(res, end);
   });
 });
 
@@ -311,18 +316,8 @@ describe("setSseHeaders", () => {
 });
 
 describe("watchClientDisconnect", () => {
-  function buildReqRes(
-    reqSocket: EventEmitter | null,
-    resSocket: EventEmitter | null,
-  ): { req: IncomingMessage; res: ServerResponse } {
-    return {
-      req: { socket: reqSocket } as unknown as IncomingMessage,
-      res: { socket: resSocket } as unknown as ServerResponse,
-    };
-  }
-
   it("returns a no-op cleanup when no sockets are available", () => {
-    const { req, res } = buildReqRes(null, null);
+    const { req, res } = makeMockHttpReqRes(null, null);
     const controller = new AbortController();
     const cleanup = watchClientDisconnect(req, res, controller);
     cleanup();
@@ -331,7 +326,7 @@ describe("watchClientDisconnect", () => {
 
   it("aborts the controller and calls onDisconnect when a socket closes", () => {
     const socket = new EventEmitter();
-    const { req, res } = buildReqRes(socket, socket);
+    const { req, res } = makeMockHttpReqRes(socket, socket);
     const controller = new AbortController();
     const onDisconnect = vi.fn();
     watchClientDisconnect(req, res, controller, onDisconnect);
@@ -342,7 +337,7 @@ describe("watchClientDisconnect", () => {
 
   it("does not double-abort when the controller is already aborted", () => {
     const socket = new EventEmitter();
-    const { req, res } = buildReqRes(socket, null);
+    const { req, res } = makeMockHttpReqRes(socket, null);
     const controller = new AbortController();
     controller.abort();
     const abortSpy = vi.spyOn(controller, "abort");
@@ -355,7 +350,7 @@ describe("watchClientDisconnect", () => {
 
   it("works without an onDisconnect callback", () => {
     const socket = new EventEmitter();
-    const { req, res } = buildReqRes(null, socket);
+    const { req, res } = makeMockHttpReqRes(null, socket);
     const controller = new AbortController();
     watchClientDisconnect(req, res, controller);
     socket.emit("close");
@@ -365,7 +360,7 @@ describe("watchClientDisconnect", () => {
   it("deduplicates identical request and response sockets", () => {
     const socket = new EventEmitter();
     const onSpy = vi.spyOn(socket, "on");
-    const { req, res } = buildReqRes(socket, socket);
+    const { req, res } = makeMockHttpReqRes(socket, socket);
     const controller = new AbortController();
     watchClientDisconnect(req, res, controller);
     expect(onSpy).toHaveBeenCalledTimes(1);
@@ -376,7 +371,7 @@ describe("watchClientDisconnect", () => {
     const resSocket = new EventEmitter();
     const reqOn = vi.spyOn(reqSocket, "on");
     const resOn = vi.spyOn(resSocket, "on");
-    const { req, res } = buildReqRes(reqSocket, resSocket);
+    const { req, res } = makeMockHttpReqRes(reqSocket, resSocket);
     const controller = new AbortController();
     watchClientDisconnect(req, res, controller);
     const reqOnCall = mockCallRecord(reqOn, 0);
@@ -389,7 +384,7 @@ describe("watchClientDisconnect", () => {
 
   it("cleanup detaches the close listener from each socket", () => {
     const socket = new EventEmitter();
-    const { req, res } = buildReqRes(socket, null);
+    const { req, res } = makeMockHttpReqRes(socket, null);
     const controller = new AbortController();
     const cleanup = watchClientDisconnect(req, res, controller);
     expect(socket.listenerCount("close")).toBe(1);

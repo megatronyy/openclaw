@@ -1,3 +1,4 @@
+// Covers duration, UTC/zoned timestamp, timezone, and relative time formatting.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatUtcTimestamp, formatZonedTimestamp, resolveTimezone } from "./format-datetime.js";
 import {
@@ -33,6 +34,7 @@ describe("format-duration", () => {
       expectFormatterCases(formatDurationCompact, [
         { input: 500, expected: "500ms" },
         { input: 999, expected: "999ms" },
+        { input: 999.6, expected: "1s" },
         { input: 1000, expected: "1s" },
         { input: 45000, expected: "45s" },
         { input: 59000, expected: "59s" },
@@ -70,6 +72,7 @@ describe("format-duration", () => {
     it("formats single-unit outputs and day threshold behavior", () => {
       expectFormatterCases(formatDurationHuman, [
         { input: 500, expected: "500ms" },
+        { input: 999.6, expected: "1s" },
         { input: 5000, expected: "5s" },
         { input: 180000, expected: "3m" },
         { input: 7200000, expected: "2h" },
@@ -87,7 +90,7 @@ describe("format-duration", () => {
       { input: 999, expected: "999ms" },
       { input: -1, expected: "0ms" },
       { input: -500, expected: "0ms" },
-      { input: 999.6, expected: "1000ms" },
+      { input: 999.6, expected: "1s" },
       { input: 1000, expected: "1s" },
       { input: 1500, expected: "1.5s" },
       { input: 1234, expected: "1.23s" },

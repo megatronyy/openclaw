@@ -1,8 +1,10 @@
+// Googlechat plugin module implements monitor access behavior.
 import {
   channelIngressRoutes,
   createChannelIngressResolver,
   defineStableChannelIngressIdentity,
 } from "openclaw/plugin-sdk/channel-ingress-runtime";
+import type { ChannelBotLoopProtectionConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -82,6 +84,7 @@ const googleChatIngressIdentity = defineStableChannelIngressIdentity({
 type GoogleChatGroupEntry = {
   requireMention?: boolean;
   enabled?: boolean;
+  botLoopProtection?: ChannelBotLoopProtectionConfig;
   users?: Array<string | number>;
   systemPrompt?: string;
 };
@@ -204,6 +207,7 @@ export async function applyGoogleChatInboundAccessPolicy(params: {
       ok: true;
       commandAuthorized: boolean | undefined;
       effectiveWasMentioned: boolean | undefined;
+      groupBotLoopProtection: ChannelBotLoopProtectionConfig | undefined;
       groupSystemPrompt: string | undefined;
     }
   | { ok: false }
@@ -456,6 +460,7 @@ export async function applyGoogleChatInboundAccessPolicy(params: {
     ok: true,
     commandAuthorized,
     effectiveWasMentioned,
+    groupBotLoopProtection: groupEntry?.botLoopProtection,
     groupSystemPrompt: normalizeOptionalString(groupEntry?.systemPrompt),
   };
 }

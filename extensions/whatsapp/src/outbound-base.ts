@@ -1,15 +1,17 @@
+// Whatsapp plugin module implements outbound base behavior.
 import {
   DEFAULT_ACCOUNT_ID,
   listCombinedAccountIds,
   normalizeOptionalAccountId,
   resolveListedDefaultAccountId,
 } from "openclaw/plugin-sdk/account-core";
+import { resolveOutboundSendDep } from "openclaw/plugin-sdk/channel-outbound";
 import {
+  attachChannelToResult,
   createAttachedChannelResultAdapter,
   type ChannelOutboundAdapter,
 } from "openclaw/plugin-sdk/channel-send-result";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { resolveOutboundSendDep } from "openclaw/plugin-sdk/outbound-send-deps";
 import { sendTextMediaPayload } from "openclaw/plugin-sdk/reply-payload";
 import {
   normalizeWhatsAppOutboundPayload,
@@ -32,6 +34,7 @@ type WhatsAppSendTextOptions = {
   mediaReadFile?: (filePath: string) => Promise<Buffer>;
   gifPlayback?: boolean;
   audioAsVoice?: boolean;
+  forceDocument?: boolean;
   accountId?: string;
   quotedMessageKey?: {
     id: string;
@@ -41,6 +44,8 @@ type WhatsAppSendTextOptions = {
     messageText?: string;
   };
   preserveLeadingWhitespace?: boolean;
+  /** Report each accepted internal platform send before the next fallible send. */
+  onDeliveryResult?: (result: { messageId: string; toJid: string }) => Promise<void> | void;
 };
 type WhatsAppSendMessage = (
   to: string,
@@ -157,27 +162,44 @@ export function createWhatsAppOutboundBase({
     resolveTarget,
     ...createAttachedChannelResultAdapter({
       channel: "whatsapp",
-      sendText: async ({ cfg, to, text, accountId, deps, gifPlayback, replyToId }) => {
+      sendText: async ({
+        cfg,
+        to,
+        text,
+        accountId,
+        deps,
+        gifPlayback,
+        replyToId,
+        onDeliveryResult,
+      }) => {
         const normalizedText = normalizeText(text);
         if (skipEmptyText && !normalizedText) {
           return { messageId: "" };
         }
-        const send =
-          resolveOutboundSendDep<WhatsAppSendMessage>(deps, "whatsapp", {
-            legacyKeys: WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS,
-          }) ?? sendMessageWhatsApp;
         const lookupAccountId = resolveQuoteLookupAccountId(cfg, accountId);
         const quotedMessageKey = resolveQuotedMessageKey({
           accountId: lookupAccountId,
           to,
           replyToId,
         });
+        const send = quotedMessageKey
+          ? sendMessageWhatsApp
+          : (resolveOutboundSendDep<WhatsAppSendMessage>(deps, "whatsapp", {
+              legacyKeys: WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS,
+            }) ?? sendMessageWhatsApp);
         return await send(to, normalizedText, {
           verbose: false,
           cfg,
           accountId: accountId ?? undefined,
           gifPlayback,
-          quotedMessageKey,
+          ...(quotedMessageKey ? { quotedMessageKey } : {}),
+          ...(onDeliveryResult
+            ? {
+                onDeliveryResult: async (result) => {
+                  await onDeliveryResult(attachChannelToResult("whatsapp", result));
+                },
+              }
+            : {}),
         });
       },
       sendMedia: async ({
@@ -192,18 +214,21 @@ export function createWhatsAppOutboundBase({
         accountId,
         deps,
         gifPlayback,
+        forceDocument,
         replyToId,
+        onDeliveryResult,
       }) => {
-        const send =
-          resolveOutboundSendDep<WhatsAppSendMessage>(deps, "whatsapp", {
-            legacyKeys: WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS,
-          }) ?? sendMessageWhatsApp;
         const lookupAccountId = resolveQuoteLookupAccountId(cfg, accountId);
         const quotedMessageKey = resolveQuotedMessageKey({
           accountId: lookupAccountId,
           to,
           replyToId,
         });
+        const send = quotedMessageKey
+          ? sendMessageWhatsApp
+          : (resolveOutboundSendDep<WhatsAppSendMessage>(deps, "whatsapp", {
+              legacyKeys: WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS,
+            }) ?? sendMessageWhatsApp);
         return await send(to, normalizeText(text), {
           verbose: false,
           cfg,
@@ -214,7 +239,15 @@ export function createWhatsAppOutboundBase({
           ...(audioAsVoice === undefined ? {} : { audioAsVoice }),
           accountId: accountId ?? undefined,
           gifPlayback,
-          quotedMessageKey,
+          forceDocument,
+          ...(quotedMessageKey ? { quotedMessageKey } : {}),
+          ...(onDeliveryResult
+            ? {
+                onDeliveryResult: async (result) => {
+                  await onDeliveryResult(attachChannelToResult("whatsapp", result));
+                },
+              }
+            : {}),
         });
       },
       sendPoll: async ({ cfg, to, poll, accountId }) =>

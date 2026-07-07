@@ -1,3 +1,4 @@
+// Matrix tests cover approval handler plugin behavior.
 import type {
   ExecApprovalRequest,
   PluginApprovalRequest,
@@ -6,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { matrixApprovalNativeRuntime } from "./approval-handler.runtime.js";
 import {
   clearMatrixApprovalReactionTargetsForTest,
-  resolveMatrixApprovalReactionTarget,
+  resolveMatrixApprovalReactionTargetWithPersistence,
 } from "./approval-reactions.js";
 
 type MatrixDeliverPendingParams = Parameters<
@@ -22,14 +23,18 @@ type MatrixPendingPluginApprovalView = Extract<
 const MATRIX_APPROVAL_METADATA_KEY = "com.openclaw.approval";
 
 function expectRecordFields(value: unknown, expected: Record<string, unknown>) {
-  expect(value).toBeDefined();
-  expect(typeof value).toBe("object");
-  expect(value).not.toBeNull();
+  if (!value || typeof value !== "object") {
+    throw new Error("Expected record");
+  }
   const actual = value as Record<string, unknown>;
   for (const [key, expectedValue] of Object.entries(expected)) {
     expect(actual[key]).toEqual(expectedValue);
   }
   return actual;
+}
+
+function mockCall<T extends readonly unknown[]>(mock: { mock: { calls: T[] } }, index = 0) {
+  return mock.mock.calls.at(index);
 }
 
 function buildMatrixReceipt(messageIds: readonly string[], roomId = "!room:example.org") {
@@ -67,6 +72,11 @@ function buildMatrixApprovalRoomTarget(
   };
 }
 
+// Pending approvals expire in the future; the reaction target store TTLs its
+// memory layer from `view.expiresAtMs - now`, so epoch-past fixtures would
+// evict the mapping before assertions run.
+const TEST_APPROVAL_EXPIRES_AT_MS = Date.now() + 5 * 60_000;
+
 function buildExecApprovalView(
   overrides: Partial<MatrixPendingExecApprovalView> = {},
 ): MatrixPendingExecApprovalView {
@@ -97,7 +107,7 @@ function buildExecApprovalView(
         command: "/approve req-1 deny",
       },
     ],
-    expiresAtMs: 1_000,
+    expiresAtMs: TEST_APPROVAL_EXPIRES_AT_MS,
     ...overrides,
   };
 }
@@ -124,7 +134,7 @@ function buildPluginApprovalView(
         command: "/approve plugin:req-1 allow-once",
       },
     ],
-    expiresAtMs: 1_000,
+    expiresAtMs: TEST_APPROVAL_EXPIRES_AT_MS,
     ...overrides,
   };
 }
@@ -204,7 +214,7 @@ describe("matrixApprovalNativeRuntime", () => {
       pendingPayload,
     });
 
-    const [target, text, options] = sendSingleTextMessage.mock.calls[0] ?? [];
+    const [target, text, options] = mockCall(sendSingleTextMessage) ?? [];
     expect(target).toBe("room:!room:example.org");
     expect(String(text)).toContain("echo hi");
     const extraContent = (options as { extraContent?: Record<string, unknown> } | undefined)
@@ -254,7 +264,7 @@ describe("matrixApprovalNativeRuntime", () => {
       pendingPayload,
     });
 
-    const [target, text, options] = sendSingleTextMessage.mock.calls[0] ?? [];
+    const [target, text, options] = mockCall(sendSingleTextMessage) ?? [];
     expect(target).toBe("room:!room:example.org");
     expect(String(text)).toContain("deploy");
     const extraContent = (options as { extraContent?: Record<string, unknown> } | undefined)
@@ -268,7 +278,7 @@ describe("matrixApprovalNativeRuntime", () => {
       kind: "plugin",
       title: "Plugin Approval Required",
       description: "Approve the tool call.",
-      expiresAtMs: 1_000,
+      expiresAtMs: TEST_APPROVAL_EXPIRES_AT_MS,
       metadata: [],
       allowedDecisions: ["allow-once"],
       actions: [
@@ -284,10 +294,10 @@ describe("matrixApprovalNativeRuntime", () => {
       agentId: "agent-1",
       severity: "critical",
     });
-    expect(reactMessage.mock.calls[0]?.[0]).toBe("!room:example.org");
-    expect(reactMessage.mock.calls[0]?.[1]).toBe("$plugin-approval");
-    expect(reactMessage.mock.calls[0]?.[2]).toBe("✅");
-    expectRecordFields(reactMessage.mock.calls[0]?.[3], { accountId: "default" });
+    expect(mockCall(reactMessage)?.[0]).toBe("!room:example.org");
+    expect(mockCall(reactMessage)?.[1]).toBe("$plugin-approval");
+    expect(mockCall(reactMessage)?.[2]).toBe("✅");
+    expectRecordFields(mockCall(reactMessage)?.[3], { accountId: "default" });
   });
 
   it("binds Matrix approval reactions before publishing option reactions", async () => {
@@ -299,7 +309,7 @@ describe("matrixApprovalNativeRuntime", () => {
     });
     const reactMessage = vi.fn().mockImplementation(async () => {
       expect(
-        resolveMatrixApprovalReactionTarget({
+        await resolveMatrixApprovalReactionTargetWithPersistence({
           roomId: "!room:example.org",
           eventId: "$approval",
           reactionKey: "✅",
@@ -468,16 +478,16 @@ describe("matrixApprovalNativeRuntime", () => {
       pendingPayload,
     });
 
-    expect(sendMessage.mock.calls[0]?.[0]).toBe("room:!room:example.org");
-    expect(sendMessage.mock.calls[0]?.[1]).toBe(pendingPayload.text);
-    expectRecordFields(sendMessage.mock.calls[0]?.[2], {
+    expect(mockCall(sendMessage)?.[0]).toBe("room:!room:example.org");
+    expect(mockCall(sendMessage)?.[1]).toBe(pendingPayload.text);
+    expectRecordFields(mockCall(sendMessage)?.[2], {
       accountId: "default",
       extraContent: pendingPayload.extraContent,
     });
-    expect(reactMessage.mock.calls[0]?.[0]).toBe("!room:example.org");
-    expect(reactMessage.mock.calls[0]?.[1]).toBe("$primary");
-    expect(typeof reactMessage.mock.calls[0]?.[2]).toBe("string");
-    expectRecordFields(reactMessage.mock.calls[0]?.[3], { accountId: "default" });
+    expect(mockCall(reactMessage)?.[0]).toBe("!room:example.org");
+    expect(mockCall(reactMessage)?.[1]).toBe("$primary");
+    expect(typeof mockCall(reactMessage)?.[2]).toBe("string");
+    expectRecordFields(mockCall(reactMessage)?.[3], { accountId: "default" });
     expectRecordFields(entry, {
       roomId: "!room:example.org",
       platformMessageIds: ["$primary", "$last"],
@@ -505,7 +515,7 @@ describe("matrixApprovalNativeRuntime", () => {
       eventId: "$primary",
     });
     expect(
-      resolveMatrixApprovalReactionTarget({
+      await resolveMatrixApprovalReactionTargetWithPersistence({
         roomId: "!room:example.org",
         eventId: "$primary",
         reactionKey: "✅",
@@ -515,7 +525,7 @@ describe("matrixApprovalNativeRuntime", () => {
       decision: "allow-once",
     });
     expect(
-      resolveMatrixApprovalReactionTarget({
+      await resolveMatrixApprovalReactionTargetWithPersistence({
         roomId: "!room:example.org",
         eventId: "$last",
         reactionKey: "✅",

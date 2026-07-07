@@ -1,3 +1,4 @@
+// Feishu tests cover monitor.comment plugin behavior.
 import { createNonExitingRuntimeEnv } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClawdbotConfig } from "../runtime-api.js";
@@ -210,6 +211,18 @@ async function setupCommentMonitorHandler(): Promise<(data: unknown) => Promise<
     fireAndForget: true,
     getBotOpenId: () => "ou_bot",
   });
+}
+
+function mockCallAt(
+  mock: { mock: { calls: Array<readonly unknown[]> } },
+  index: number,
+  label: string,
+): readonly unknown[] {
+  const call = mock.mock.calls[index];
+  if (!call) {
+    throw new Error(`expected ${label} call`);
+  }
+  return call;
 }
 
 describe("resolveDriveCommentEventTurn", () => {
@@ -828,7 +841,7 @@ describe("drive.notice.comment_add_v1 monitor handler", () => {
     await onComment(makeDriveCommentEvent());
 
     expect(handleFeishuCommentEventMock).toHaveBeenCalledTimes(1);
-    const handleArgs = handleFeishuCommentEventMock.mock.calls[0]?.[0] as
+    const handleArgs = mockCallAt(handleFeishuCommentEventMock, 0, "Feishu comment handler")[0] as
       | {
           accountId?: string;
           botOpenId?: string;
@@ -859,7 +872,9 @@ describe("drive.notice.comment_add_v1 monitor handler", () => {
         reply_id: "reply_1",
       }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      expect(handleFeishuCommentEventMock).toHaveBeenCalledTimes(1);
+    });
 
     await onComment(
       makeDriveCommentEvent({
@@ -867,20 +882,27 @@ describe("drive.notice.comment_add_v1 monitor handler", () => {
         reply_id: "reply_2",
       }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      expect(dedup.claimUnprocessedFeishuMessage).toHaveBeenCalledTimes(2);
+    });
 
     expect(handleFeishuCommentEventMock).toHaveBeenCalledTimes(1);
 
     resolveFirst?.();
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleFeishuCommentEventMock).toHaveBeenCalledTimes(2);
-    const firstCallArgs = handleFeishuCommentEventMock.mock.calls.at(0) as
-      | [{ event?: { event_id?: string } }]
-      | undefined;
-    const secondCallArgs = handleFeishuCommentEventMock.mock.calls.at(1) as
-      | [{ event?: { event_id?: string } }]
-      | undefined;
+    await vi.waitFor(() => {
+      expect(handleFeishuCommentEventMock).toHaveBeenCalledTimes(2);
+    });
+    const firstCallArgs = mockCallAt(
+      handleFeishuCommentEventMock,
+      0,
+      "first Feishu comment handler",
+    ) as [{ event?: { event_id?: string } }] | undefined;
+    const secondCallArgs = mockCallAt(
+      handleFeishuCommentEventMock,
+      1,
+      "second Feishu comment handler",
+    ) as [{ event?: { event_id?: string } }] | undefined;
     const firstCall = firstCallArgs?.[0];
     const secondCall = secondCallArgs?.[0];
     expect(firstCall?.event?.event_id).toBe("evt_1");
@@ -909,11 +931,14 @@ describe("drive.notice.comment_add_v1 monitor handler", () => {
         "default",
       );
       expect(lastRuntime?.error).toHaveBeenCalledWith(
-        expect.stringContaining("error handling drive comment notice: Error: post-send failure"),
+        "feishu[default]: error handling drive comment notice: Error: post-send failure",
       );
     });
-    const [recordedMessageId, recordedNamespace, recordedLogger] =
-      (dedup.recordProcessedFeishuMessage as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
+    const [recordedMessageId, recordedNamespace, recordedLogger] = mockCallAt(
+      dedup.recordProcessedFeishuMessage as ReturnType<typeof vi.fn>,
+      0,
+      "Feishu processed-message record",
+    );
     expect(recordedMessageId).toBe("drive-comment:10d9d60b990db39f96a4c2fd357fb877");
     expect(recordedNamespace).toBe("default");
     expect(typeof recordedLogger).toBe("function");
@@ -936,9 +961,7 @@ describe("drive.notice.comment_add_v1 monitor handler", () => {
         "default",
       );
       expect(lastRuntime?.error).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "error handling drive comment notice: FeishuRetryableSyntheticEventError: retry me",
-        ),
+        "feishu[default]: error handling drive comment notice: FeishuRetryableSyntheticEventError: retry me",
       );
     });
   });

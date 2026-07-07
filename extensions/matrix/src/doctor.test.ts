@@ -1,3 +1,4 @@
+// Matrix tests cover doctor plugin behavior.
 import fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -58,7 +59,7 @@ describe("matrix doctor", () => {
   }
 
   function expectChangeContaining(changes: readonly string[], fragment: string): void {
-    expect(changes.some((change) => change.includes(fragment))).toBe(true);
+    expect(changes.join("\n")).toContain(fragment);
   }
 
   it("formats state and crypto previews", () => {
@@ -93,6 +94,8 @@ describe("matrix doctor", () => {
     });
     expect(previews[0]).toBe("- matrix warning");
     expect(previews[1]).toContain("/tmp/recovery-key.txt");
+    expect(previews[1]).toContain("Recovery key state: Matrix SQLite state");
+    expect(previews[1]).toContain("Migration state: Matrix SQLite state");
   });
 
   it("warns on stale custom Matrix plugin paths and cleans them", async () => {

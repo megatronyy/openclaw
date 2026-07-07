@@ -1,10 +1,19 @@
+// Plugin MCP serve tests cover serving plugin tools over MCP.
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  type HookContext,
+  wrapToolWithBeforeToolCallHook,
+} from "../agents/agent-tools.before-tool-call.js";
 import type { AnyAgentTool } from "../agents/tools/common.js";
 import {
   initializeGlobalHookRunner,
   resetGlobalHookRunner,
 } from "../plugins/hook-runner-global.js";
 import { createMockPluginRegistry } from "../plugins/hooks.test-helpers.js";
+import { PluginApprovalResolutions } from "../plugins/types.js";
 import { createPluginToolsMcpHandlers } from "./plugin-tools-handlers.js";
 
 const callGatewayTool = vi.hoisted(() => vi.fn());
@@ -58,8 +67,16 @@ afterEach(() => {
   resetGlobalHookRunner();
 });
 
+function requireFirstMockCall(calls: readonly unknown[][], label: string): unknown[] {
+  const call = calls.at(0);
+  if (!call) {
+    throw new Error(`expected ${label} call`);
+  }
+  return call;
+}
+
 function requireToolPolicyParams(mock: ReturnType<typeof vi.fn>) {
-  const params = mock.mock.calls[0]?.[0] as
+  const params = requireFirstMockCall(mock.mock.calls, "plugin tool policy")[0] as
     | { toolAllowlist?: string[]; toolDenylist?: string[] }
     | undefined;
   if (!params) {
@@ -71,6 +88,8 @@ function requireToolPolicyParams(mock: ReturnType<typeof vi.fn>) {
 describe("plugin tools MCP server", () => {
   it("routes logs to stderr before resolving tools for stdio", async () => {
     const { servePluginToolsMcp } = await import("./plugin-tools-serve.js");
+    const runtimeRegistry = createMockPluginRegistry([]);
+    ensureStandalonePluginToolRegistryLoadedMock.mockReturnValue(runtimeRegistry);
     resolvePluginToolsMock.mockReturnValue([
       {
         name: "memory_recall",
@@ -88,6 +107,9 @@ describe("plugin tools MCP server", () => {
       context: { config: { plugins: { enabled: true } } },
     });
     expect(resolvePluginToolsMock).toHaveBeenCalledTimes(1);
+    expect(resolvePluginToolsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ runtimeRegistry }),
+    );
     expect(ensureStandalonePluginToolRegistryLoadedMock.mock.invocationCallOrder[0]).toBeLessThan(
       resolvePluginToolsMock.mock.invocationCallOrder[0] ?? 0,
     );
@@ -149,15 +171,92 @@ describe("plugin tools MCP server", () => {
       name: "memory_recall",
       arguments: { query: "remember this" },
     });
-    expect(execute).toHaveBeenCalledWith(
-      expect.stringMatching(/^mcp-\d+$/),
-      {
-        query: "remember this",
-      },
-      undefined,
-      undefined,
-    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    const executeCall = requireFirstMockCall(execute.mock.calls, "plugin tool execute");
+    const requestId = executeCall[0];
+    expect(typeof requestId).toBe("string");
+    expect((requestId as string).startsWith("mcp-")).toBe(true);
+    expect(Number.isSafeInteger(Number((requestId as string).slice("mcp-".length)))).toBe(true);
+    expect(executeCall[1]).toEqual({ query: "remember this" });
+    expect(executeCall[2]).toBeUndefined();
+    expect(executeCall[3]).toBeUndefined();
     expect(result.content).toEqual([{ type: "text", text: "Stored." }]);
+  });
+
+  it("serializes source-shaped image tool content with pinned MCP image blocks", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      content: [
+        { type: "text", text: "browser screenshot" },
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: "iVBORw0KGgo=",
+          },
+        },
+      ],
+    });
+    const tool = {
+      name: "browser_screenshot",
+      description: "Capture a browser screenshot",
+      parameters: { type: "object", properties: {} },
+      execute,
+    } as unknown as AnyAgentTool;
+
+    const handlers = createPluginToolsMcpHandlers([tool]);
+    const result = await handlers.callTool({
+      name: "browser_screenshot",
+      arguments: {},
+    });
+
+    expect(result.content).toEqual([
+      { type: "text", text: "browser screenshot" },
+      { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+    ]);
+    expect(() => CallToolResultSchema.parse(result)).not.toThrow();
+  });
+
+  it("delivers source-shaped images through a real MCP client", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      content: [
+        { type: "text", text: "browser screenshot" },
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: "iVBORw0KGgo=",
+          },
+        },
+      ],
+    });
+    const tool = {
+      name: "browser_screenshot",
+      description: "Capture a browser screenshot",
+      parameters: { type: "object", properties: {} },
+      execute,
+    } as unknown as AnyAgentTool;
+    const { createToolsMcpServer } =
+      await vi.importActual<typeof import("./tools-stdio-server.js")>("./tools-stdio-server.js");
+    const server = createToolsMcpServer({ name: "plugin-tools-image-test", tools: [tool] });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: "plugin-tools-image-test-client", version: "0.0.0" },
+      { capabilities: {} },
+    );
+
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: "browser_screenshot", arguments: {} });
+      expect(result.content).toEqual([
+        { type: "text", text: "browser screenshot" },
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+      ]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 
   it("serializes plugin tool results that do not use the MCP content envelope", async () => {
@@ -217,8 +316,9 @@ describe("plugin tools MCP server", () => {
     expect(failed.content).toEqual([{ type: "text", text: "Tool error: boom" }]);
   });
 
-  it("blocks tool execution when before_tool_call requires approval on the MCP bridge", async () => {
+  it("reports approval requirements without opening plugin approvals on the MCP bridge", async () => {
     let hookCalls = 0;
+    const onResolution = vi.fn();
     const execute = vi.fn().mockResolvedValue({
       content: "Stored.",
     });
@@ -233,13 +333,13 @@ describe("plugin tools MCP server", () => {
                 pluginId: "test-plugin",
                 title: "Approval required",
                 description: "Approval required",
+                onResolution,
               },
             };
           },
         },
       ]),
     );
-    callGatewayTool.mockRejectedValueOnce(new Error("gateway unavailable"));
     const tool = {
       name: "memory_store",
       description: "Store memory",
@@ -253,10 +353,72 @@ describe("plugin tools MCP server", () => {
       arguments: { text: "remember this" },
     });
     expect(hookCalls).toBe(1);
+    expect(callGatewayTool).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
     expect(result.isError).toBe(true);
-    expect(result.content).toEqual([
-      { type: "text", text: "Tool error: Plugin approval required (gateway unavailable)" },
-    ]);
+    expect(result.content).toEqual([{ type: "text", text: "Tool error: Approval required" }]);
+    expect(onResolution).toHaveBeenCalledWith(PluginApprovalResolutions.CANCELLED);
+  });
+
+  it("switches pre-wrapped plugin tools to approval report mode on the MCP bridge", async () => {
+    const onResolution = vi.fn();
+    const execute = vi.fn().mockResolvedValue({
+      content: "Stored.",
+    });
+    const originalContext = {
+      agentId: "agent-with-plugins",
+      sessionKey: "session-with-plugins",
+    } satisfies HookContext;
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([
+        {
+          hookName: "before_tool_call",
+          handler: async (_event, ctx) => {
+            const hookContext = ctx as HookContext | undefined;
+            if (hookContext?.sessionKey !== originalContext.sessionKey) {
+              return undefined;
+            }
+            return {
+              requireApproval: {
+                pluginId: "test-plugin",
+                title: "Approval required",
+                description: "Approval required",
+                onResolution,
+              },
+            };
+          },
+        },
+      ]),
+    );
+    callGatewayTool.mockRejectedValue(new Error("gateway unavailable"));
+    const tool = wrapToolWithBeforeToolCallHook(
+      {
+        name: "memory_store",
+        description: "Store memory",
+        parameters: { type: "object", properties: {} },
+        execute,
+      } as unknown as AnyAgentTool,
+      originalContext,
+    );
+
+    const handlers = createPluginToolsMcpHandlers([tool]);
+    const result = await handlers.callTool({
+      name: "memory_store",
+      arguments: { text: "remember this" },
+    });
+    expect(callGatewayTool).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: "Tool error: Approval required" }]);
+    expect(onResolution).toHaveBeenCalledTimes(1);
+    expect(onResolution).toHaveBeenLastCalledWith(PluginApprovalResolutions.CANCELLED);
+
+    await expect(tool.execute("agent-tool-call", { text: "remember this" })).rejects.toThrow(
+      "Plugin approval required (gateway unavailable)",
+    );
+    expect(callGatewayTool).toHaveBeenCalledTimes(1);
+    expect(onResolution).toHaveBeenCalledTimes(2);
+    expect(onResolution).toHaveBeenLastCalledWith(PluginApprovalResolutions.CANCELLED);
+    expect(execute).not.toHaveBeenCalled();
   });
 });

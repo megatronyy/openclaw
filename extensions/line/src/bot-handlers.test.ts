@@ -1,3 +1,4 @@
+// Line tests cover bot handlers plugin behavior.
 import type { webhook } from "@line/bot-sdk";
 import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,8 +21,9 @@ vi.mock("openclaw/plugin-sdk/channel-pairing", () => ({
       onCreated?.();
     },
 }));
-vi.mock("openclaw/plugin-sdk/command-auth", () => ({
+vi.mock("openclaw/plugin-sdk/command-auth-native", () => ({
   hasControlCommand: (text: string) => text.trim().startsWith("!"),
+  shouldComputeCommandAuthorized: (text: string) => text.trim().startsWith("!"),
   resolveControlCommandGate: ({
     hasControlCommand,
     authorizers,
@@ -54,6 +56,43 @@ vi.mock("openclaw/plugin-sdk/runtime-env", () => ({
 }));
 vi.mock("openclaw/plugin-sdk/reply-history", () => ({
   DEFAULT_GROUP_HISTORY_LIMIT: 20,
+  createChannelHistoryWindow: ({ historyMap }: { historyMap: Map<string, HistoryEntry[]> }) => ({
+    record: ({
+      historyKey,
+      limit,
+      entry,
+    }: {
+      historyKey: string;
+      limit: number;
+      entry: HistoryEntry;
+    }) => {
+      const existing = historyMap.get(historyKey) ?? [];
+      historyMap.set(historyKey, [...existing, entry].slice(-limit));
+    },
+    buildInboundHistory: ({ historyKey, limit }: { historyKey: string; limit: number }) => {
+      if (limit <= 0) {
+        return undefined;
+      }
+      return (historyMap.get(historyKey) ?? []).slice(-limit);
+    },
+    clear: ({ historyKey }: { historyKey: string }) => {
+      historyMap.delete(historyKey);
+    },
+  }),
+  buildInboundHistoryFromMap: ({
+    historyMap,
+    historyKey,
+    limit,
+  }: {
+    historyMap: Map<string, HistoryEntry[]>;
+    historyKey: string;
+    limit: number;
+  }) => {
+    if (limit <= 0) {
+      return undefined;
+    }
+    return (historyMap.get(historyKey) ?? []).slice(-limit);
+  },
   clearHistoryEntriesIfEnabled: ({
     historyMap,
     historyKey,
@@ -86,6 +125,7 @@ const { readAllowFromStoreMock, upsertPairingRequestMock } = vi.hoisted(() => ({
   readAllowFromStoreMock: vi.fn(async () => [] as string[]),
   upsertPairingRequestMock: vi.fn(async (_args: unknown) => ({ code: "CODE", created: true })),
 }));
+const downloadLineMediaMock = vi.hoisted(() => vi.fn());
 
 vi.mock("openclaw/plugin-sdk/conversation-runtime", () => ({
   resolvePairingIdLabel: () => "lineUserId",
@@ -94,9 +134,7 @@ vi.mock("openclaw/plugin-sdk/conversation-runtime", () => ({
 }));
 
 vi.mock("./download.js", () => ({
-  downloadLineMedia: async () => {
-    throw new Error("downloadLineMedia should not be called from bot-handlers tests");
-  },
+  downloadLineMedia: downloadLineMediaMock,
 }));
 
 vi.mock("./send.js", () => ({
@@ -284,7 +322,7 @@ describe("handleLineWebhookEvents", () => {
   afterAll(() => {
     vi.doUnmock("openclaw/plugin-sdk/channel-inbound");
     vi.doUnmock("openclaw/plugin-sdk/channel-pairing");
-    vi.doUnmock("openclaw/plugin-sdk/command-auth");
+    vi.doUnmock("openclaw/plugin-sdk/command-auth-native");
     vi.doUnmock("openclaw/plugin-sdk/runtime-group-policy");
     vi.doUnmock("openclaw/plugin-sdk/runtime-env");
     vi.doUnmock("openclaw/plugin-sdk/reply-history");
@@ -311,6 +349,10 @@ describe("handleLineWebhookEvents", () => {
     readAllowFromStoreMock.mockImplementation(async () => [] as string[]);
     upsertPairingRequestMock.mockReset();
     upsertPairingRequestMock.mockImplementation(async () => ({ code: "CODE", created: true }));
+    downloadLineMediaMock.mockReset();
+    downloadLineMediaMock.mockImplementation(async () => {
+      throw new Error("downloadLineMedia should not be called from bot-handlers tests");
+    });
   });
   it("blocks group messages when groupPolicy is disabled", async () => {
     const processMessage = vi.fn();
@@ -873,11 +915,10 @@ describe("handleLineWebhookEvents", () => {
     expect(processMessage).not.toHaveBeenCalled();
     const entries = groupHistories.get("group-hist-1");
     expect(entries).toHaveLength(1);
-    expect(entries?.[0]).toMatchObject({
-      sender: "user:user-hist",
-      body: "hello history",
-      timestamp: 1700000000000,
-    });
+    const entry = entries?.[0];
+    expect(entry?.sender).toBe("user:user-hist");
+    expect(entry?.body).toBe("hello history");
+    expect(entry?.timestamp).toBe(1700000000000);
   });
 
   it("skips group messages without mention when requireMention is set", async () => {
@@ -965,6 +1006,73 @@ describe("handleLineWebhookEvents", () => {
     );
 
     expect(buildLineMessageContextMock).toHaveBeenCalledTimes(1);
+    expect(processMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards LINE file names to media downloads", async () => {
+    const processMessage = vi.fn();
+    downloadLineMediaMock.mockResolvedValueOnce({
+      path: "/tmp/line-media/voice-note.m4a",
+      contentType: "audio/x-m4a",
+      size: 1234,
+    });
+    const event = createTestMessageEvent({
+      message: {
+        id: "file-audio-1",
+        type: "file",
+        fileName: "voice-note.m4a",
+        fileSize: 4096,
+      } as MessageEvent["message"],
+      source: { type: "user", userId: "user-file-audio" },
+      webhookEventId: "evt-file-audio",
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        dmPolicy: "open",
+      }),
+    );
+
+    expect(downloadLineMediaMock).toHaveBeenCalledWith("file-audio-1", "token", 1, {
+      originalFilename: "voice-note.m4a",
+    });
+    expect(buildLineMessageContextMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allMedia: [
+          {
+            path: "/tmp/line-media/voice-note.m4a",
+            contentType: "audio/x-m4a",
+          },
+        ],
+      }),
+    );
+    expect(processMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports failed media materialization to the message-context owner", async () => {
+    downloadLineMediaMock.mockRejectedValueOnce(new Error("expired content"));
+    const processMessage = vi.fn();
+    const event = createTestMessageEvent({
+      message: {
+        id: "image-failed-1",
+        type: "image",
+        contentProvider: { type: "line" },
+        quoteToken: "q-image-failed",
+      },
+      source: { type: "user", userId: "user-image-failed" },
+      webhookEventId: "evt-image-failed",
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({ processMessage, dmPolicy: "open" }),
+    );
+
+    expect(buildLineMessageContextMock).toHaveBeenCalledWith(
+      expect.objectContaining({ allMedia: [], mediaUnavailable: true }),
+    );
     expect(processMessage).toHaveBeenCalledTimes(1);
   });
 

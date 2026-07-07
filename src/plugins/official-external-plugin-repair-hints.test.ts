@@ -1,3 +1,4 @@
+// Covers repair hints for official external plugin installs.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveMissingOfficialExternalChannelPluginRepairHint } from "./official-external-plugin-repair-hints.js";
 
@@ -40,6 +41,31 @@ describe("resolveMissingOfficialExternalChannelPluginRepairHint", () => {
       doctorFixCommand: "openclaw doctor --fix",
       repairHint:
         "Install the official external plugin with: openclaw plugins install @openclaw/feishu, or run: openclaw doctor --fix.",
+    });
+  });
+
+  it("prefers the ClawHub install hint for externalized WhatsApp", () => {
+    mocks.resolveConfiguredChannelPresencePolicy.mockReturnValue([
+      {
+        channelId: "whatsapp",
+        sources: ["explicit-config"],
+        effective: false,
+        pluginIds: [],
+        blockedReasons: ["no-channel-owner"],
+      },
+    ]);
+
+    expect(
+      resolveMissingOfficialExternalChannelPluginRepairHint({
+        config: { channels: { whatsapp: { enabled: true } } },
+        channelId: "whatsapp",
+      }),
+    ).toMatchObject({
+      pluginId: "whatsapp",
+      channelId: "whatsapp",
+      label: "WhatsApp",
+      installSpec: "clawhub:@openclaw/whatsapp",
+      installCommand: "openclaw plugins install clawhub:@openclaw/whatsapp",
     });
   });
 

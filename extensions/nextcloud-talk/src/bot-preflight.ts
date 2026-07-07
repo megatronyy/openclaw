@@ -1,10 +1,17 @@
+// Nextcloud Talk plugin module implements bot preflight behavior.
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { parseStrictNonNegativeInteger } from "openclaw/plugin-sdk/number-runtime";
+import {
+  readProviderJsonResponse,
+  readResponseTextLimited,
+} from "openclaw/plugin-sdk/provider-http";
 import { fetchWithSsrFGuard } from "../runtime-api.js";
 import type { ResolvedNextcloudTalkAccount } from "./accounts.js";
 import { resolveNextcloudTalkApiCredentials } from "./api-credentials.js";
 import { ssrfPolicyFromPrivateNetworkOptIn } from "./send.runtime.js";
 
 const BOT_FEATURE_RESPONSE = 2;
+const BOT_PREFLIGHT_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
 
 type NextcloudTalkBotAdminEntry = {
   id?: number | string;
@@ -46,14 +53,10 @@ function normalizeUrlForMatch(value: string | undefined): string {
 }
 
 function coerceFeatureMask(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
     return value;
   }
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  return undefined;
+  return parseStrictNonNegativeInteger(value);
 }
 
 function formatMissingResponseFeatureMessage(bot: NextcloudTalkBotAdminEntry, features?: number) {
@@ -126,7 +129,10 @@ export async function probeNextcloudTalkBotResponseFeature(params: {
     });
     try {
       if (!response.ok) {
-        const body = await response.text().catch(() => "");
+        const body = await readResponseTextLimited(
+          response,
+          BOT_PREFLIGHT_ERROR_BODY_LIMIT_BYTES,
+        ).catch(() => "");
         return {
           ok: false,
           code: "api_error",
@@ -135,9 +141,9 @@ export async function probeNextcloudTalkBotResponseFeature(params: {
         };
       }
 
-      const payload = (await response.json()) as {
+      const payload = await readProviderJsonResponse<{
         ocs?: { data?: NextcloudTalkBotAdminEntry[] };
-      };
+      }>(response, "Nextcloud Talk bot response feature probe failed");
       const bots = Array.isArray(payload.ocs?.data) ? payload.ocs.data : [];
       const bot = bots.find((entry) => normalizeUrlForMatch(entry.url) === webhookUrl);
       if (!bot) {
@@ -172,10 +178,11 @@ export async function probeNextcloudTalkBotResponseFeature(params: {
       await release();
     }
   } catch (error) {
+    const detail = error instanceof Error ? error.message : formatErrorMessage(error);
     return {
       ok: false,
       code: "request_failed",
-      message: `Nextcloud Talk bot response feature probe failed: ${formatErrorMessage(error)}`,
+      message: `Nextcloud Talk bot response feature probe failed: ${detail}`,
     };
   }
 }

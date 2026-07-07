@@ -1,3 +1,5 @@
+import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+// Memory Core plugin entrypoint registers its OpenClaw integration.
 import {
   jsonResult,
   resolveMemorySearchConfig,
@@ -11,14 +13,14 @@ import {
   type AnyAgentTool,
   type OpenClawPluginToolContext,
 } from "openclaw/plugin-sdk/plugin-entry";
+import type { OpenKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
 import type { TSchema } from "typebox";
+import { configureMemoryCoreDreamingState } from "./src/dreaming-state.js";
 import { registerShortTermPromotionDreaming } from "./src/dreaming.js";
 import { buildMemoryFlushPlan } from "./src/flush-plan.js";
-import { registerBuiltInMemoryEmbeddingProviders } from "./src/memory/provider-adapters.js";
 import { buildPromptSection } from "./src/prompt-section.js";
 
 type MemoryToolsModule = typeof import("./src/tools.js");
-type RuntimeProviderModule = typeof import("./src/runtime-provider.js");
 
 type MemoryToolOptions = {
   config?: OpenClawConfig;
@@ -26,20 +28,14 @@ type MemoryToolOptions = {
   agentId?: string;
   agentSessionKey?: string;
   sandboxed?: boolean;
+  oneShotCliRun?: boolean;
 };
 
-let memoryToolsModulePromise: Promise<MemoryToolsModule> | undefined;
-let runtimeProviderModulePromise: Promise<RuntimeProviderModule> | undefined;
+const loadMemoryToolsModule = createLazyRuntimeModule(() => import("./src/tools.js"));
 
-function loadMemoryToolsModule(): Promise<MemoryToolsModule> {
-  memoryToolsModulePromise ??= import("./src/tools.js");
-  return memoryToolsModulePromise;
-}
-
-function loadRuntimeProviderModule(): Promise<RuntimeProviderModule> {
-  runtimeProviderModulePromise ??= import("./src/runtime-provider.js");
-  return runtimeProviderModulePromise;
-}
+const loadRuntimeProviderModule = createLazyRuntimeModule(
+  () => import("./src/runtime-provider.js"),
+);
 
 function getToolConfig(options: MemoryToolOptions): OpenClawConfig | undefined {
   return options.getConfig?.() ?? options.config;
@@ -62,7 +58,7 @@ const MemorySearchSchema = {
   type: "object",
   properties: {
     query: { type: "string" },
-    maxResults: { type: "number" },
+    maxResults: { type: "integer", minimum: 1 },
     minScore: { type: "number" },
     corpus: { type: "string", enum: ["memory", "wiki", "all", "sessions"] },
   },
@@ -74,8 +70,8 @@ const MemoryGetSchema = {
   type: "object",
   properties: {
     path: { type: "string" },
-    from: { type: "number" },
-    lines: { type: "number" },
+    from: { type: "integer", minimum: 1 },
+    lines: { type: "integer", minimum: 1 },
     corpus: { type: "string", enum: ["memory", "wiki", "all"] },
   },
   required: ["path"],
@@ -151,6 +147,7 @@ function resolveMemoryToolOptions(ctx: OpenClawPluginToolContext): MemoryToolOpt
     agentId: ctx.agentId,
     agentSessionKey: ctx.sessionKey,
     sandboxed: ctx.sandboxed,
+    oneShotCliRun: ctx.oneShotCliRun,
   };
 }
 
@@ -166,6 +163,10 @@ const memoryRuntime: MemoryPluginRuntime = {
     const { memoryRuntime: runtime } = await loadRuntimeProviderModule();
     await runtime.closeAllMemorySearchManagers?.();
   },
+  async closeMemorySearchManager(params) {
+    const { memoryRuntime: runtime } = await loadRuntimeProviderModule();
+    await runtime.closeMemorySearchManager?.(params);
+  },
 };
 export default definePluginEntry({
   id: "memory-core",
@@ -173,7 +174,9 @@ export default definePluginEntry({
   description: "File-backed memory search tools and CLI",
   kind: "memory",
   register(api) {
-    registerBuiltInMemoryEmbeddingProviders(api);
+    configureMemoryCoreDreamingState(<T>(options: OpenKeyedStoreOptions) =>
+      api.runtime.state.openKeyedStore<T>(options),
+    );
     registerShortTermPromotionDreaming(api);
     api.registerMemoryCapability({
       promptBuilder: buildPromptSection,
@@ -199,6 +202,7 @@ export default definePluginEntry({
       name: "dreaming",
       description: "Enable or disable memory dreaming.",
       acceptsArgs: true,
+      exposeSenderIsOwner: true,
       handler: async (ctx) => {
         const { handleDreamingCommand } = await import("./src/dreaming-command.js");
         return await handleDreamingCommand(api, ctx);
@@ -207,7 +211,7 @@ export default definePluginEntry({
 
     api.registerCli(
       async ({ program }) => {
-        const { registerMemoryCli } = await import("./src/cli.js");
+        const { registerMemoryCli } = await import("./cli.js");
         registerMemoryCli(program);
       },
       {

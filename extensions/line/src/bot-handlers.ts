@@ -1,3 +1,4 @@
+// Line plugin module implements bot handlers behavior.
 import type { webhook } from "@line/bot-sdk";
 import { buildMentionRegexes, matchesMentionPatterns } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-ingress-runtime";
@@ -12,8 +13,7 @@ import {
 import { createClaimableDedupe, type ClaimableDedupe } from "openclaw/plugin-sdk/persistent-dedupe";
 import {
   DEFAULT_GROUP_HISTORY_LIMIT,
-  clearHistoryEntriesIfEnabled,
-  recordPendingHistoryEntryIfEnabled,
+  createChannelHistoryWindow,
   type HistoryEntry,
 } from "openclaw/plugin-sdk/reply-history";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
@@ -24,7 +24,10 @@ import {
   resolveDefaultGroupPolicy,
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
-import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  normalizeOptionalString,
+  normalizeStringEntries,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import { firstDefined, normalizeLineAllowEntry } from "./bot-access.js";
 import {
   buildLineMessageContext,
@@ -187,6 +190,7 @@ async function sendLinePairingReply(params: {
   })();
   await createChannelPairingChallengeIssuer({
     channel: "line",
+    accountId: context.account.accountId,
     upsertPairingRequest: async ({ id, meta }) =>
       await upsertChannelPairingRequest({
         channel: "line",
@@ -450,8 +454,7 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
     const historyKey = groupId ?? roomId;
     const senderId = sourceInfo.userId ?? "unknown";
     if (historyKey && context.groupHistories) {
-      recordPendingHistoryEntryIfEnabled({
-        historyMap: context.groupHistories,
+      createChannelHistoryWindow({ historyMap: context.groupHistories }).record({
         historyKey,
         limit: context.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
         entry: {
@@ -465,15 +468,21 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
   }
 
   const allMedia: MediaRef[] = [];
+  let mediaUnavailable = false;
 
   if (isDownloadableLineMessageType(message.type)) {
     try {
-      const media = await downloadLineMedia(message.id, account.channelAccessToken, mediaMaxBytes);
+      const originalFilename =
+        message.type === "file" ? normalizeOptionalString(message.fileName) : undefined;
+      const media = await downloadLineMedia(message.id, account.channelAccessToken, mediaMaxBytes, {
+        originalFilename,
+      });
       allMedia.push({
         path: media.path,
         contentType: media.contentType,
       });
     } catch (err) {
+      mediaUnavailable = true;
       const errMsg = String(err);
       if (errMsg.includes("exceeds") && errMsg.includes("limit")) {
         logVerbose(`line: media exceeds size limit for message ${message.id}`);
@@ -486,6 +495,7 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
   const messageContext = await buildLineMessageContext({
     event,
     allMedia,
+    mediaUnavailable,
     cfg,
     account,
     commandAuthorized: decision.commandAccess.authorized,
@@ -503,8 +513,7 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
   if (isGroup && context.groupHistories) {
     const historyKey = groupId ?? roomId;
     if (historyKey && context.groupHistories.has(historyKey)) {
-      clearHistoryEntriesIfEnabled({
-        historyMap: context.groupHistories,
+      createChannelHistoryWindow({ historyMap: context.groupHistories }).clear({
         historyKey,
         limit: context.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
       });
@@ -618,6 +627,20 @@ export async function handleLineWebhookEvents(
     }
   }
   if (firstError) {
-    throw firstError;
+    throw toLintErrorObject(firstError, "Non-Error thrown");
   }
+}
+
+function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return new Error(value);
+  }
+  const error = new Error(fallbackMessage, { cause: value });
+  if ((typeof value === "object" && value !== null) || typeof value === "function") {
+    Object.assign(error, value);
+  }
+  return error;
 }

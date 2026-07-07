@@ -1,10 +1,50 @@
+// Verifies default model alias config values and overrides.
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONTEXT_TOKENS } from "../agents/defaults.js";
-import { applyModelDefaults } from "./defaults.js";
+import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
+import { applyModelDefaults as applyModelDefaultsWithPolicy } from "./defaults.js";
 import type { OpenClawConfig } from "./types.js";
+import { validateConfigObjectWithPlugins } from "./validation.js";
+
+const emptyManifestRegistry = { plugins: [] } satisfies Pick<PluginManifestRegistry, "plugins">;
+
+function applyModelDefaults(
+  cfg: OpenClawConfig,
+  options?: Parameters<typeof applyModelDefaultsWithPolicy>[1],
+) {
+  return applyModelDefaultsWithPolicy(cfg, options ?? { manifestRegistry: emptyManifestRegistry });
+}
 
 describe("applyModelDefaults", () => {
+  beforeAll(() => {
+    vi.stubEnv(
+      "OPENCLAW_BUNDLED_PLUGINS_DIR",
+      path.resolve(import.meta.dirname, "../../extensions"),
+    );
+    // Provider public artifacts are process-stable. Keep their one-time load out of assertions.
+    applyModelDefaults({
+      models: {
+        providers: {
+          google: {
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+            models: [],
+          },
+        },
+      },
+    });
+    applyModelDefaults({
+      models: {
+        providers: {
+          anthropic: {
+            baseUrl: "https://api.anthropic.com",
+            models: [],
+          },
+        },
+      },
+    });
+  });
+
   beforeEach(() => {
     vi.stubEnv(
       "OPENCLAW_BUNDLED_PLUGINS_DIR",
@@ -70,12 +110,43 @@ describe("applyModelDefaults", () => {
     } satisfies OpenClawConfig;
   }
 
+  function buildCustomProviderManifestRegistry() {
+    return {
+      plugins: [
+        {
+          id: "custom-provider-plugin",
+          channels: [],
+          providers: ["myproxy"],
+          cliBackends: [],
+          skills: [],
+          hooks: [],
+          origin: "config",
+          rootDir: "/tmp/custom-provider-plugin",
+          source: "test",
+          manifestPath: "/tmp/custom-provider-plugin/openclaw.plugin.json",
+          modelIdNormalization: {
+            providers: {
+              myproxy: {
+                aliases: {
+                  latest: "modern-model",
+                },
+                prefixWhenBare: "vendor",
+              },
+            },
+          },
+        },
+      ],
+      diagnostics: [],
+    } satisfies PluginManifestRegistry;
+  }
+
   it("adds default aliases when models are present", () => {
     const cfg = {
       agents: {
         defaults: {
           models: {
-            "anthropic/claude-opus-4-7": {},
+            "anthropic/claude-opus-4-8": {},
+            "anthropic/claude-sonnet-5": {},
             "openai/gpt-5.4": {},
           },
         },
@@ -83,7 +154,8 @@ describe("applyModelDefaults", () => {
     } satisfies OpenClawConfig;
     const next = applyModelDefaults(cfg);
 
-    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-7"]?.alias).toBe("opus");
+    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-8"]?.alias).toBe("opus");
+    expect(next.agents?.defaults?.models?.["anthropic/claude-sonnet-5"]?.alias).toBe("sonnet");
     expect(next.agents?.defaults?.models?.["openai/gpt-5.4"]?.alias).toBe("gpt");
   });
 
@@ -92,7 +164,7 @@ describe("applyModelDefaults", () => {
       agents: {
         defaults: {
           models: {
-            "anthropic/claude-opus-4-7": { alias: "Opus" },
+            "anthropic/claude-opus-4-8": { alias: "Opus" },
           },
         },
       },
@@ -100,7 +172,25 @@ describe("applyModelDefaults", () => {
 
     const next = applyModelDefaults(cfg);
 
-    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-7"]?.alias).toBe("Opus");
+    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-8"]?.alias).toBe("Opus");
+  });
+
+  it("preserves an authored Sonnet alias when the new default target is also present", () => {
+    const cfg = {
+      agents: {
+        defaults: {
+          models: {
+            "anthropic/claude-sonnet-4-6": { alias: "Sonnet" },
+            "anthropic/claude-sonnet-5": {},
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+
+    const next = applyModelDefaults(cfg);
+
+    expect(next.agents?.defaults?.models?.["anthropic/claude-sonnet-4-6"]?.alias).toBe("Sonnet");
+    expect(next.agents?.defaults?.models?.["anthropic/claude-sonnet-5"]?.alias).toBeUndefined();
   });
 
   it("respects explicit empty alias disables", () => {
@@ -122,7 +212,7 @@ describe("applyModelDefaults", () => {
     expect(next.agents?.defaults?.models?.["google/gemini-3-flash-preview"]?.alias).toBe(
       "gemini-flash",
     );
-    expect(next.agents?.defaults?.models?.["google/gemini-3.1-flash-lite-preview"]?.alias).toBe(
+    expect(next.agents?.defaults?.models?.["google/gemini-3.1-flash-lite"]?.alias).toBe(
       "gemini-flash-lite",
     );
   });
@@ -162,6 +252,61 @@ describe("applyModelDefaults", () => {
     expect(next.agents?.defaults?.model).toEqual({
       primary: "google/gemini-3.1-pro-preview",
       fallbacks: ["google/gemini-3.1-pro-preview", "openai/gpt-5.5"],
+    });
+  });
+
+  it("normalizes the retired Together default primary and fallback refs", () => {
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "together/moonshotai/Kimi-K2.5",
+            fallbacks: ["together/moonshotai/Kimi-K2.5", "openai/gpt-5.5"],
+          },
+          models: {
+            "together/moonshotai/Kimi-K2.5": {},
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+
+    const next = applyModelDefaults(cfg);
+
+    expect(next.agents?.defaults?.model).toEqual({
+      primary: "together/moonshotai/Kimi-K2.6",
+      fallbacks: ["together/moonshotai/Kimi-K2.6", "openai/gpt-5.5"],
+    });
+    expect(next.agents?.defaults?.models).toEqual({
+      "together/moonshotai/Kimi-K2.6": {},
+    });
+  });
+
+  it("normalizes retired Gemini per-agent model refs", () => {
+    const cfg = {
+      agents: {
+        list: [
+          {
+            id: "ops",
+            model: {
+              primary: "google/gemini-3-pro-preview",
+              fallbacks: ["google/gemini-3-pro-preview"],
+            },
+            models: {
+              "google/gemini-3-pro-preview": {},
+            },
+          },
+        ],
+      },
+    } satisfies OpenClawConfig;
+
+    const next = applyModelDefaults(cfg);
+
+    expect(next.agents?.list?.[0]?.model).toEqual({
+      primary: "google/gemini-3.1-pro-preview",
+      fallbacks: ["google/gemini-3.1-pro-preview"],
+    });
+    expect(next.agents?.list?.[0]?.models).toEqual({
+      "google/gemini-3.1-pro-preview": {},
     });
   });
 
@@ -233,6 +378,50 @@ describe("applyModelDefaults", () => {
     const next = applyModelDefaults(cfg);
 
     expect(next.models?.providers?.myproxy?.models?.[0]?.id).toBe("google/gemini-3.1-pro-preview");
+  });
+
+  it("normalizes provider-prefixed nested retired Gemini ids in proxy provider rows", () => {
+    const cfg = buildProxyProviderConfig();
+    const model = cfg.models.providers.myproxy.models[0];
+    model.id = "myproxy/google/gemini-3-pro-preview";
+    model.name = "Gemini via proxy";
+
+    const next = applyModelDefaults(cfg);
+
+    expect(next.models?.providers?.myproxy?.models?.[0]?.id).toBe(
+      "myproxy/google/gemini-3.1-pro-preview",
+    );
+  });
+
+  it("normalizes configured provider rows with explicit manifest registry policies", () => {
+    const cfg = buildProxyProviderConfig();
+    const model = cfg.models.providers.myproxy.models[0];
+    model.id = "latest";
+    model.name = "Custom latest";
+
+    const next = applyModelDefaults(cfg, {
+      manifestRegistry: buildCustomProviderManifestRegistry(),
+    });
+
+    expect(next.models?.providers?.myproxy?.models?.[0]?.id).toBe("vendor/modern-model");
+  });
+
+  it("loads manifest policies for model defaults even when plugin validation is skipped", () => {
+    const cfg = buildProxyProviderConfig();
+    const model = cfg.models.providers.myproxy.models[0];
+    model.id = "latest";
+    model.name = "Custom latest";
+    const result = validateConfigObjectWithPlugins(cfg, {
+      pluginValidation: "skip",
+      loadPluginMetadataSnapshot: () => ({
+        manifestRegistry: buildCustomProviderManifestRegistry(),
+      }),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.models?.providers?.myproxy?.models?.[0]?.id).toBe("vendor/modern-model");
+    }
   });
 
   it("fills missing model provider defaults", () => {

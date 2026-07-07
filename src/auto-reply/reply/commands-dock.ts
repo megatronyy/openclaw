@@ -1,8 +1,10 @@
-import { getActivePluginChannelRegistry } from "../../plugins/runtime.js";
+// Implements dock commands that bind sessions to local workspaces.
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
-} from "../../shared/string-coerce.js";
+} from "@openclaw/normalization-core/string-coerce";
+import { normalizeTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
+import { getActivePluginChannelRegistry } from "../../plugins/runtime.js";
 import { resolveTextCommand } from "../commands-registry.js";
 import { resolveCommandSurfaceChannel } from "./channel-context.js";
 import { persistSessionEntry } from "./commands-session-store.js";
@@ -91,7 +93,7 @@ function resolveLinkedDockTarget(params: {
     if (!Array.isArray(ids)) {
       continue;
     }
-    const normalizedIds = ids.map((id) => normalizeLowercaseStringOrEmpty(id)).filter(Boolean);
+    const normalizedIds = normalizeTrimmedStringList(ids).map((id) => id.toLowerCase());
     if (!normalizedIds.some((id) => params.sourceCandidates.has(id))) {
       continue;
     }
@@ -173,7 +175,10 @@ export const handleDockCommand: CommandHandler = async (params, allowTextCommand
   sessionEntry.lastTo = target.peerId;
   sessionEntry.lastAccountId = resolveTargetChannelAccountId(params, targetChannel);
   params.sessionEntry = sessionEntry;
-  const persisted = await persistSessionEntry(params);
+  const persisted = await persistSessionEntry({
+    ...params,
+    touchedFields: ["lastChannel", "lastTo", "lastAccountId"],
+  });
   if (!persisted) {
     return {
       shouldContinue: false,

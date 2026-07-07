@@ -1,3 +1,4 @@
+// Signal tests cover access policy plugin behavior.
 import type { AccessGroupsConfig, OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { describe, expect, it, vi } from "vitest";
 import { handleSignalDirectMessageAccess, resolveSignalAccessState } from "./access-policy.js";
@@ -214,10 +215,8 @@ describe("resolveSignalAccessState", () => {
     });
 
     expect(access.senderAccess.decision).toBe("allow");
-    expect(access.commandAccess).toMatchObject({
-      authorized: false,
-      shouldBlockControlCommand: true,
-    });
+    expect(access.commandAccess.authorized).toBe(false);
+    expect(access.commandAccess.shouldBlockControlCommand).toBe(true);
   });
 
   it("authorizes group control commands from the shared ingress command gate", async () => {
@@ -233,10 +232,8 @@ describe("resolveSignalAccessState", () => {
       hasControlCommand: true,
     });
 
-    expect(access.commandAccess).toMatchObject({
-      authorized: true,
-      shouldBlockControlCommand: false,
-    });
+    expect(access.commandAccess.authorized).toBe(true);
+    expect(access.commandAccess.shouldBlockControlCommand).toBe(false);
   });
 });
 

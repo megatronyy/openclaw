@@ -1,3 +1,6 @@
+/**
+ * Tests command status runtime lazy loading and direct status reply behavior.
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const buildStatusReply = vi.fn(async (params: unknown) => params);
@@ -42,6 +45,14 @@ const { resolveDirectStatusReplyForSession } = await import("./command-status.ru
 
 function expectResolvedReasoningLevel(value: unknown, expected: string) {
   expect((value as { resolvedReasoningLevel?: unknown }).resolvedReasoningLevel).toBe(expected);
+}
+
+function requireBuildStatusReplyParams(index = 0): unknown {
+  const call = buildStatusReply.mock.calls[index];
+  if (!call) {
+    throw new Error(`expected buildStatusReply call ${index}`);
+  }
+  return call[0];
 }
 
 describe("resolveDirectStatusReplyForSession", () => {
@@ -100,7 +111,7 @@ describe("resolveDirectStatusReplyForSession", () => {
     });
 
     expect(buildStatusReply).toHaveBeenCalledOnce();
-    expectResolvedReasoningLevel(buildStatusReply.mock.calls[0]?.[0], "off");
+    expectResolvedReasoningLevel(requireBuildStatusReplyParams(), "off");
     expectResolvedReasoningLevel(result, "off");
   });
 

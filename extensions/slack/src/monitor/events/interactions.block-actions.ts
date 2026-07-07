@@ -1,20 +1,28 @@
+// Slack plugin module implements interactions.block actions behavior.
 import type { SlackActionMiddlewareArgs } from "@slack/bolt";
 import type { Block, KnownBlock } from "@slack/web-api";
 import { resolveApprovalOverGateway } from "openclaw/plugin-sdk/approval-gateway-runtime";
 import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
 import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
 import { requestHeartbeat } from "openclaw/plugin-sdk/heartbeat-runtime";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
 import {
-  isSlackExecApprovalApprover,
-  isSlackExecApprovalAuthorizedSender,
-} from "../../exec-approvals.js";
+  parseStrictFiniteNumber,
+  timestampMsToIsoString,
+} from "openclaw/plugin-sdk/number-runtime";
+import {
+  normalizeOptionalString,
+  normalizeUniqueTrimmedStringList,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
+import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
+import { isSlackApprovalAuthorizedSender } from "../../approval-auth.js";
+import { isSlackExecApprovalAuthorizedSender } from "../../exec-approvals.js";
 import { dispatchSlackPluginInteractiveHandler } from "../../interactive-dispatch.js";
 import {
   SLACK_REPLY_BUTTON_ACTION_ID,
+  SLACK_REPLY_LINK_ACTION_ID,
   SLACK_REPLY_SELECT_ACTION_ID,
 } from "../../reply-action-ids.js";
+import { truncateSlackText } from "../../truncate.js";
 import {
   authorizeSlackSystemEventSender,
   resolveSlackCommandIngress,
@@ -92,7 +100,7 @@ type SlackBlockActionBody = {
   response_url?: string;
   channel?: { id?: string };
   container?: { channel_id?: string; message_ts?: string; thread_ts?: string };
-  message?: { ts?: string; text?: string; blocks?: unknown[] };
+  message?: { ts?: string; thread_ts?: string; text?: string; blocks?: unknown[] };
 };
 
 type SlackBlockActionRespond = NonNullable<SlackActionMiddlewareArgs["respond"]>;
@@ -138,20 +146,7 @@ function readOptionLabels(options: unknown): string[] | undefined {
 }
 
 function uniqueNonEmptyStrings(values: string[]): string[] {
-  const unique: string[] = [];
-  const seen = new Set<string>();
-  for (const entry of values) {
-    if (typeof entry !== "string") {
-      continue;
-    }
-    const trimmed = entry.trim();
-    if (!trimmed || seen.has(trimmed)) {
-      continue;
-    }
-    seen.add(trimmed);
-    unique.push(trimmed);
-  }
-  return unique;
+  return normalizeUniqueTrimmedStringList(values);
 }
 
 function collectRichTextFragments(value: unknown, out: string[]): void {
@@ -180,7 +175,7 @@ function summarizeRichTextPreview(value: unknown): string | undefined {
     return undefined;
   }
   const max = 120;
-  return joined.length <= max ? joined : `${joined.slice(0, max - 1)}…`;
+  return joined.length <= max ? joined : truncateSlackText(joined, max);
 }
 
 function readInteractionAction(raw: unknown) {
@@ -237,7 +232,9 @@ export function summarizeAction(action: Record<string, unknown>): SlackActionSum
   ]);
   const inputValue = typeof typed.value === "string" ? typed.value : undefined;
   const inputNumber =
-    actionType === "number_input" && inputValue != null ? Number.parseFloat(inputValue) : undefined;
+    actionType === "number_input" && inputValue != null
+      ? parseStrictFiniteNumber(inputValue)
+      : undefined;
   const parsedNumber = Number.isFinite(inputNumber) ? inputNumber : undefined;
   const inputEmail =
     actionType === "email_text_input" && inputValue?.includes("@") ? inputValue : undefined;
@@ -328,7 +325,10 @@ function formatInteractionSelectionLabel(params: {
     return params.summary.selectedTime;
   }
   if (typeof params.summary.selectedDateTime === "number") {
-    return new Date(params.summary.selectedDateTime * 1000).toISOString();
+    const selectedDateTime = timestampMsToIsoString(params.summary.selectedDateTime * 1000);
+    if (selectedDateTime) {
+      return selectedDateTime;
+    }
   }
   if (params.summary.richTextPreview) {
     return params.summary.richTextPreview;
@@ -378,6 +378,17 @@ function isSlackReplyActionId(actionId: string): boolean {
     actionId.startsWith(`${SLACK_REPLY_BUTTON_ACTION_ID}:`) ||
     actionId.startsWith(`${SLACK_REPLY_SELECT_ACTION_ID}:`)
   );
+}
+
+function isSlackReplyLinkAction(parsed: ParsedSlackBlockAction): boolean {
+  if (
+    parsed.actionId === SLACK_REPLY_LINK_ACTION_ID ||
+    parsed.actionId.startsWith(`${SLACK_REPLY_LINK_ACTION_ID}:`)
+  ) {
+    return true;
+  }
+  const legacyUrl = normalizeOptionalString((parsed.typedAction as { url?: unknown }).url);
+  return Boolean(legacyUrl && isSlackReplyActionId(parsed.actionId));
 }
 
 function buildSlackPluginInteractionId(params: {
@@ -433,7 +444,7 @@ function parseSlackBlockAction(params: {
     userId: typedBody.user?.id ?? "unknown",
     channelId: typedBody.channel?.id ?? typedBody.container?.channel_id,
     messageTs: typedBody.message?.ts ?? typedBody.container?.message_ts,
-    threadTs: typedBody.container?.thread_ts,
+    threadTs: typedBody.container?.thread_ts ?? typedBody.message?.thread_ts,
     actionSummary: summarizeAction(typedAction),
   };
 }
@@ -544,7 +555,7 @@ async function handleSlackExecApprovalInteraction(params: {
   if (!approval) {
     return false;
   }
-  const pluginApprovalAuthorizedSender = isSlackExecApprovalApprover({
+  const pluginApprovalAuthorizedSender = isSlackApprovalAuthorizedSender({
     cfg: params.ctx.cfg,
     accountId: params.ctx.accountId,
     senderId: params.parsed.userId,
@@ -555,9 +566,13 @@ async function handleSlackExecApprovalInteraction(params: {
     senderId: params.parsed.userId,
   });
   const isPluginApproval = approval.approvalId.startsWith("plugin:");
+  const resolveUnprefixedAsPlugin =
+    !isPluginApproval && !execApprovalAuthorizedSender && pluginApprovalAuthorizedSender;
   const authorized = isPluginApproval
     ? pluginApprovalAuthorizedSender
-    : execApprovalAuthorizedSender || pluginApprovalAuthorizedSender;
+    : execApprovalAuthorizedSender || resolveUnprefixedAsPlugin;
+  const allowPluginFallback =
+    !isPluginApproval && execApprovalAuthorizedSender && pluginApprovalAuthorizedSender;
   if (!authorized) {
     params.ctx.runtime.log?.(
       `slack:interaction drop exec approval user=${params.parsed.userId} (not authorized)`,
@@ -572,7 +587,8 @@ async function handleSlackExecApprovalInteraction(params: {
       approvalId: approval.approvalId,
       decision: approval.decision,
       senderId: params.parsed.userId,
-      allowPluginFallback: pluginApprovalAuthorizedSender,
+      allowPluginFallback,
+      ...(resolveUnprefixedAsPlugin ? { resolveMethod: "plugin" as const } : {}),
       clientDisplayName: `Slack approval (${params.parsed.userId.trim() || "unknown"})`,
     });
   } catch (error) {
@@ -791,7 +807,6 @@ function enqueueSlackBlockActionEvent(params: {
       accountId: params.ctx.accountId,
       threadId: params.parsed.threadTs,
     },
-    trusted: false,
   });
   if (queued) {
     requestHeartbeat({
@@ -899,6 +914,10 @@ async function handleSlackBlockAction(params: {
     log: params.ctx.runtime.log,
   });
   if (!parsed) {
+    return;
+  }
+  // Slack reports URL-button clicks too; navigation must not enqueue an agent interaction.
+  if (isSlackReplyLinkAction(parsed)) {
     return;
   }
   params.trackEvent?.();

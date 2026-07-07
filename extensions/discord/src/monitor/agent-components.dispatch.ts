@@ -1,10 +1,12 @@
+// Discord plugin module implements agent componentsispatch behavior.
 import { resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
 import {
   formatInboundEnvelope,
   resolveEnvelopeFormatOptions,
+  runChannelInboundEvent,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
-import { runInboundReplyTurn } from "openclaw/plugin-sdk/inbound-reply-dispatch";
+import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import { logError } from "openclaw/plugin-sdk/logging-core";
 import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { getAgentScopedMediaLocalRoots } from "openclaw/plugin-sdk/media-runtime";
@@ -35,18 +37,11 @@ import {
 import { buildDirectLabel, buildGuildLabel } from "./reply-context.js";
 import { deliverDiscordReply } from "./reply-delivery.js";
 
-let conversationRuntimePromise: Promise<typeof import("./agent-components.runtime.js")> | undefined;
-let typingRuntimePromise: Promise<typeof import("./typing.js")> | undefined;
+const loadConversationRuntime = createLazyRuntimeModule(
+  () => import("./agent-components.runtime.js"),
+);
 
-async function loadConversationRuntime() {
-  conversationRuntimePromise ??= import("./agent-components.runtime.js");
-  return await conversationRuntimePromise;
-}
-
-async function loadTypingRuntime() {
-  typingRuntimePromise ??= import("./typing.js");
-  return await typingRuntimePromise;
-}
+const loadTypingRuntime = createLazyRuntimeModule(() => import("./typing.js"));
 
 function buildDiscordComponentConversationLabel(params: {
   interactionCtx: ComponentInteractionContext;
@@ -111,6 +106,7 @@ export async function dispatchDiscordComponentEvent(params: {
   const sessionKey = params.routeOverrides?.sessionKey ?? route.sessionKey;
   const agentId = params.routeOverrides?.agentId ?? route.agentId;
   const accountId = params.routeOverrides?.accountId ?? route.accountId;
+  const inboundLastRouteSessionKey = sessionKey;
   const fromLabel = buildDiscordComponentConversationLabel({
     interactionCtx,
     interaction,
@@ -223,6 +219,12 @@ export async function dispatchDiscordComponentEvent(params: {
     Surface: "discord" as const,
     WasMentioned: true,
     CommandAuthorized: commandAuthorized,
+    CommandTurn: {
+      kind: "text-slash" as const,
+      source: "text" as const,
+      authorized: commandAuthorized,
+      body: eventText,
+    },
     CommandSource: "text" as const,
     MessageSid: interaction.rawData.id,
     Timestamp: timestamp,
@@ -255,7 +257,7 @@ export async function dispatchDiscordComponentEvent(params: {
     startId: params.replyToId,
   });
 
-  await runInboundReplyTurn({
+  await runChannelInboundEvent({
     channel: "discord",
     accountId,
     raw: interaction,
@@ -280,23 +282,24 @@ export async function dispatchDiscordComponentEvent(params: {
         record: {
           updateLastRoute: interactionCtx.isDirectMessage
             ? {
-                sessionKey: route.mainSessionKey,
+                sessionKey: inboundLastRouteSessionKey,
                 channel: "discord",
                 to:
                   resolveDiscordComponentOriginatingTo(interactionCtx) ??
                   `user:${interactionCtx.userId}`,
                 accountId,
-                mainDmOwnerPin: pinnedMainDmOwner
-                  ? {
-                      ownerRecipient: pinnedMainDmOwner,
-                      senderRecipient: interactionCtx.userId,
-                      onSkip: ({ ownerRecipient, senderRecipient }) => {
-                        logVerbose(
-                          `discord: skip main-session last route for ${senderRecipient} (pinned owner ${ownerRecipient})`,
-                        );
-                      },
-                    }
-                  : undefined,
+                mainDmOwnerPin:
+                  inboundLastRouteSessionKey === route.mainSessionKey && pinnedMainDmOwner
+                    ? {
+                        ownerRecipient: pinnedMainDmOwner,
+                        senderRecipient: interactionCtx.userId,
+                        onSkip: ({ ownerRecipient, senderRecipient }) => {
+                          logVerbose(
+                            `discord: skip main-session last route for ${senderRecipient} (pinned owner ${ownerRecipient})`,
+                          );
+                        },
+                      }
+                    : undefined,
               }
             : undefined,
           onRecordError: (err) => {
@@ -304,7 +307,7 @@ export async function dispatchDiscordComponentEvent(params: {
           },
         },
         delivery: {
-          deliver: async (payload) => {
+          deliver: async (payload, info) => {
             const replyToId = replyReference.use();
             await deliverDiscordReply({
               cfg: ctx.cfg,
@@ -325,6 +328,7 @@ export async function dispatchDiscordComponentEvent(params: {
               tableMode,
               chunkMode: resolveChunkMode(ctx.cfg, "discord", accountId),
               mediaLocalRoots,
+              kind: info.kind,
             });
             replyReference.markSent();
           },

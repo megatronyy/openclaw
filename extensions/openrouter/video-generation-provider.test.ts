@@ -1,3 +1,4 @@
+// Openrouter tests cover video generation provider plugin behavior.
 import { clearLiveCatalogCacheForTests } from "openclaw/plugin-sdk/provider-catalog-shared";
 import {
   expectExplicitVideoGenerationCapabilities,
@@ -53,19 +54,40 @@ vi.mock("openclaw/plugin-sdk/provider-http", async () => {
 
 function releasedJson(value: unknown) {
   return {
-    response: {
-      json: async () => value,
-    },
+    response: new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
     release: vi.fn(async () => {}),
+  };
+}
+
+function releasedOversizedJsonStream() {
+  let canceled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(16 * 1024 * 1024 + 1));
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  return {
+    response: new Response(stream, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    release: vi.fn(async () => {}),
+    wasCanceled: () => canceled,
   };
 }
 
 function releasedVideo(params: { contentType: string; bytes: string }) {
   return {
-    response: {
-      headers: new Headers({ "content-type": params.contentType }),
-      arrayBuffer: async () => Buffer.from(params.bytes),
-    },
+    response: new Response(Buffer.from(params.bytes), {
+      status: 200,
+      headers: { "content-type": params.contentType },
+    }),
     release: vi.fn(async () => {}),
   };
 }
@@ -94,8 +116,6 @@ function requireFetchCallHeaders(index: number): Headers {
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  expect(typeof value).toBe("object");
-  expect(value).not.toBeNull();
   if (typeof value !== "object" || value === null) {
     throw new Error(`${label} was not an object`);
   }
@@ -138,11 +158,11 @@ function requireMockCallArg(
   argIndex: number,
   label: string,
 ) {
-  const call = mockCalls[index];
+  const call = mockCalls.at(index);
   if (!call) {
     throw new Error(`expected ${label} call ${index + 1}`);
   }
-  return call[argIndex];
+  return call.at(argIndex);
 }
 
 function requireGeneratedVideo(result: OpenRouterVideoResult, index: number) {
@@ -238,7 +258,10 @@ describe("openrouter video generation provider", () => {
     });
 
     expectRecordFields(
-      requireRecord(resolveProviderHttpRequestConfigMock.mock.calls[0]?.[0], "request config"),
+      requireRecord(
+        requireMockCallArg(resolveProviderHttpRequestConfigMock.mock.calls, 0, 0, "request config"),
+        "request config",
+      ),
       {
         baseUrl: "https://custom.openrouter.test/openrouter/api/v1",
         defaultBaseUrl: "https://openrouter.ai/api/v1",
@@ -258,7 +281,6 @@ describe("openrouter video generation provider", () => {
     });
     expect(rows).toHaveLength(1);
     const row = rows[0];
-    expect(row).toBeDefined();
     if (!row) {
       throw new Error("expected OpenRouter catalog row");
     }
@@ -289,6 +311,40 @@ describe("openrouter video generation provider", () => {
       enabled: true,
       maxInputImages: 2,
     });
+  });
+
+  it("cancels oversized OpenRouter video catalog success bodies", async () => {
+    const oversized = releasedOversizedJsonStream();
+    fetchWithTimeoutGuardedMock.mockResolvedValueOnce(oversized);
+
+    await expect(
+      listOpenRouterVideoModelCatalog({
+        config: {
+          models: {
+            providers: {
+              openrouter: {
+                baseUrl: "https://custom.openrouter.test/openrouter/api/v1",
+              },
+            },
+          },
+        } as never,
+        env: {},
+        resolveProviderApiKey: () => ({
+          apiKey: "OPENROUTER_API_KEY",
+          discoveryApiKey: "resolved-openrouter-key",
+        }),
+        resolveProviderAuth: () => ({
+          apiKey: "OPENROUTER_API_KEY",
+          discoveryApiKey: "resolved-openrouter-key",
+          mode: "api_key",
+          source: "env",
+        }),
+      }),
+    ).rejects.toThrow(
+      "OpenRouter video models request failed: JSON response exceeds 16777216 bytes",
+    );
+    expect(oversized.wasCanceled()).toBe(true);
+    expect(oversized.release).toHaveBeenCalledOnce();
   });
 
   it("skips live OpenRouter video catalog discovery without an API key", async () => {
@@ -346,8 +402,10 @@ describe("openrouter video generation provider", () => {
       "https://custom.openrouter.test/openrouter/api/v1/videos/models",
       "openrouter-video-models",
     );
-    expect(fetchWithTimeoutGuardedMock.mock.calls[0]?.[2]).toBe(12_345);
-    expect(fetchWithTimeoutGuardedMock.mock.calls[0]?.[3]).toBeTypeOf("function");
+    expect(requireMockCallArg(fetchWithTimeoutGuardedMock.mock.calls, 0, 2, "fetch")).toBe(12_345);
+    expect(requireMockCallArg(fetchWithTimeoutGuardedMock.mock.calls, 0, 3, "fetch")).toBeTypeOf(
+      "function",
+    );
     const resolvedCapabilities = requireRecord(capabilities, "resolved capabilities");
     expect(resolvedCapabilities.providerOptions).toEqual({
       callback_url: "string",
@@ -480,11 +538,15 @@ describe("openrouter video generation provider", () => {
       ).provider,
     ).toBe("openrouter");
     expectRecordFields(
-      requireRecord(resolveProviderHttpRequestConfigMock.mock.calls[0]?.[0], "request config"),
+      requireRecord(
+        requireMockCallArg(resolveProviderHttpRequestConfigMock.mock.calls, 0, 0, "request config"),
+        "request config",
+      ),
       {
         provider: "openrouter",
         capability: "video",
         baseUrl: "https://custom.openrouter.test/api/v1",
+        allowPrivateNetwork: false,
         request: requestOverrides,
       },
     );
@@ -546,6 +608,151 @@ describe("openrouter video generation provider", () => {
       generationId: "gen-123",
       usage: { cost: 0.25, is_byok: false },
     });
+  });
+
+  it("returns unsigned URL-only videos when downloads exceed the configured media cap", async () => {
+    postJsonRequestMock.mockResolvedValue(
+      releasedJson({
+        id: "job-123",
+        polling_url: "/api/v1/videos/job-123",
+        status: "completed",
+        unsigned_urls: ["https://cdn.openrouter.test/video.mp4"],
+      }),
+    );
+    fetchWithTimeoutGuardedMock.mockResolvedValueOnce(
+      releasedVideo({ contentType: "video/mp4", bytes: "too-large" }),
+    );
+
+    const provider = buildOpenRouterVideoGenerationProvider();
+    const result = await provider.generateVideo({
+      provider: "openrouter",
+      model: "google/veo-3.1",
+      prompt: "A glass cube reflects a neon skyline",
+      cfg: { agents: { defaults: { mediaMaxMb: 0.000001 } } } as never,
+    });
+
+    expect(result.videos).toEqual([
+      {
+        url: "https://cdn.openrouter.test/video.mp4",
+        mimeType: "video/mp4",
+        fileName: "video-1.mp4",
+      },
+    ]);
+  });
+
+  it("rejects malformed numeric seed values before submitting video jobs", async () => {
+    const provider = buildOpenRouterVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "openrouter",
+        model: "google/veo-3.1",
+        prompt: "A glass cube reflects a neon skyline",
+        cfg: {} as never,
+        providerOptions: {
+          seed: 42.9,
+        },
+      }),
+    ).rejects.toThrow("OpenRouter video seed must be an integer");
+
+    expect(postJsonRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("wraps malformed successful OpenRouter submit responses", async () => {
+    postJsonRequestMock.mockResolvedValue(releasedJson([]));
+
+    const provider = buildOpenRouterVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "openrouter",
+        model: "google/veo-3.1",
+        prompt: "bad shape",
+        cfg: {} as never,
+      }),
+    ).rejects.toThrow("OpenRouter video generation response malformed");
+  });
+
+  it("wraps non-JSON successful OpenRouter submit responses", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: new Response("<html></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+      release: vi.fn(async () => {}),
+    });
+
+    const provider = buildOpenRouterVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "openrouter",
+        model: "google/veo-3.1",
+        prompt: "html body",
+        cfg: {} as never,
+      }),
+    ).rejects.toThrow("OpenRouter video generation response malformed");
+  });
+
+  it("bounds oversized successful OpenRouter submit responses", async () => {
+    const oversized = releasedOversizedJsonStream();
+    postJsonRequestMock.mockResolvedValue(oversized);
+
+    const provider = buildOpenRouterVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "openrouter",
+        model: "google/veo-3.1",
+        prompt: "oversized body",
+        cfg: {} as never,
+      }),
+    ).rejects.toThrow("OpenRouter video generation: JSON response exceeds 16777216 bytes");
+    expect(oversized.wasCanceled()).toBe(true);
+  });
+
+  it("rejects unknown OpenRouter poll statuses without waiting for timeout", async () => {
+    postJsonRequestMock.mockResolvedValue(
+      releasedJson({
+        id: "job-123",
+        polling_url: "/api/v1/videos/job-123",
+        status: "pending",
+      }),
+    );
+    fetchWithTimeoutGuardedMock.mockResolvedValueOnce(
+      releasedJson({
+        id: "job-123",
+        status: "nearly_done",
+      }),
+    );
+
+    const provider = buildOpenRouterVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "openrouter",
+        model: "google/veo-3.1",
+        prompt: "bad status",
+        cfg: {} as never,
+      }),
+    ).rejects.toThrow("OpenRouter video generation response malformed");
+    expect(waitProviderOperationPollIntervalMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed OpenRouter completed output URL arrays", async () => {
+    postJsonRequestMock.mockResolvedValue(
+      releasedJson({
+        id: "job-123",
+        polling_url: "/api/v1/videos/job-123",
+        status: "completed",
+        unsigned_urls: { 0: "/api/v1/videos/job-123/content?index=0" },
+      }),
+    );
+
+    const provider = buildOpenRouterVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "openrouter",
+        model: "google/veo-3.1",
+        prompt: "bad urls",
+        cfg: {} as never,
+      }),
+    ).rejects.toThrow("OpenRouter video generation response malformed");
   });
 
   it("does not forward auth headers to cross-origin polling URLs", async () => {

@@ -1,12 +1,18 @@
-import type { StreamFn } from "@earendil-works/pi-agent-core";
-import type { ProviderWrapStreamFnContext } from "openclaw/plugin-sdk/plugin-entry";
-import { OPENROUTER_THINKING_STREAM_HOOKS } from "openclaw/plugin-sdk/provider-stream-family";
+// Openrouter plugin module implements stream behavior.
+import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import {
-  createDeepSeekV4OpenAICompatibleThinkingWrapper,
-  type DeepSeekV4ReasoningEffort,
-  type DeepSeekV4ThinkingLevel,
-  createPayloadPatchStreamWrapper,
-} from "openclaw/plugin-sdk/provider-stream-shared";
+  createAssistantMessageEventStream,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+} from "openclaw/plugin-sdk/llm";
+import type { ProviderWrapStreamFnContext } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  assertOkOrThrowHttpError,
+  fetchWithTimeoutGuarded,
+  readProviderJsonResponse,
+} from "openclaw/plugin-sdk/provider-http";
+import { OPENROUTER_THINKING_STREAM_HOOKS } from "openclaw/plugin-sdk/provider-stream-family";
+import { createPayloadPatchStreamWrapper } from "openclaw/plugin-sdk/provider-stream-shared";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { isOpenRouterDeepSeekV4ModelId } from "./models.js";
 import {
@@ -16,6 +22,13 @@ import {
 } from "./provider-catalog.js";
 
 const log = createSubsystemLogger("openrouter-stream");
+const OPENROUTER_GENERATION_LOOKUP_TIMEOUT_MS = 2_000;
+
+type OpenRouterGenerationResponse = {
+  data?: {
+    total_cost?: unknown;
+  };
+};
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value.trim() : undefined;
@@ -56,25 +69,219 @@ function shouldPatchDeepSeekV4OpenRouterPayload(model: Parameters<StreamFn>[0]):
   );
 }
 
-function resolveOpenRouterDeepSeekV4ReasoningEffort(
-  thinkingLevel: DeepSeekV4ThinkingLevel,
-): DeepSeekV4ReasoningEffort {
-  switch (thinkingLevel) {
-    case "minimal":
-    case "low":
-    case "medium":
-    case "high":
-    case "xhigh":
-      return thinkingLevel;
-    case "max":
-      return "xhigh";
-    case "adaptive":
-      return "medium";
-    case "off":
-    case undefined:
-      return "high";
+function shouldPatchOpenRouterRoutingPayload(model: Parameters<StreamFn>[0]): boolean {
+  const api = readString(model.api);
+  return (api === undefined || api === "openai-completions") && isVerifiedOpenRouterRoute(model);
+}
+
+function resolveOpenRouterGenerationUrl(
+  model: Parameters<StreamFn>[0],
+  responseId: string,
+): string {
+  const baseUrl = readString(model.baseUrl) || OPENROUTER_BASE_URL;
+  const url = new URL("generation", `${baseUrl.replace(/\/$/, "")}/`);
+  url.searchParams.set("id", responseId);
+  return url.href;
+}
+
+function readOpenRouterTotalCost(payload: OpenRouterGenerationResponse): number | undefined {
+  const totalCost = payload.data?.total_cost;
+  if (typeof totalCost !== "number" || !Number.isFinite(totalCost) || totalCost < 0) {
+    return undefined;
   }
-  return "high";
+  return totalCost;
+}
+
+function isDoneEvent(
+  event: AssistantMessageEvent,
+): event is Extract<AssistantMessageEvent, { type: "done" }> {
+  return event.type === "done";
+}
+
+async function fetchOpenRouterGenerationTotalCost(params: {
+  apiKey: string;
+  model: Parameters<StreamFn>[0];
+  responseId: string;
+}): Promise<number | undefined> {
+  const url = resolveOpenRouterGenerationUrl(params.model, params.responseId);
+  const { response, release } = await fetchWithTimeoutGuarded(
+    url,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${params.apiKey}`,
+        "HTTP-Referer": "https://openclaw.ai",
+        "X-OpenRouter-Title": "OpenClaw",
+      },
+    },
+    OPENROUTER_GENERATION_LOOKUP_TIMEOUT_MS,
+    fetch,
+    { auditContext: "openrouter-generation-cost" },
+  );
+  try {
+    await assertOkOrThrowHttpError(response, "OpenRouter generation metadata request failed");
+    return readOpenRouterTotalCost(
+      await readProviderJsonResponse<OpenRouterGenerationResponse>(
+        response,
+        "openrouter.generation-cost",
+      ),
+    );
+  } finally {
+    await release();
+  }
+}
+
+async function applyOpenRouterBilledCost(params: {
+  apiKey: string | undefined;
+  message: AssistantMessage;
+  model: Parameters<StreamFn>[0];
+}): Promise<void> {
+  const apiKey = readString(params.apiKey);
+  const responseId = readString((params.message as { responseId?: unknown }).responseId);
+  if (!apiKey || !responseId || !params.message.usage?.cost) {
+    return;
+  }
+  try {
+    const totalCost = await fetchOpenRouterGenerationTotalCost({
+      apiKey,
+      model: params.model,
+      responseId,
+    });
+    if (totalCost !== undefined) {
+      params.message.usage.cost.total = totalCost;
+    }
+  } catch (error) {
+    log.debug?.(
+      `kept streamed OpenRouter cost estimate because generation metadata lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function createOpenRouterBilledCostWrapper(
+  baseStreamFn: StreamFn | undefined,
+): StreamFn | undefined {
+  if (!baseStreamFn) {
+    return baseStreamFn;
+  }
+  return async (model, context, options) => {
+    const source = await baseStreamFn(model, context, options);
+    if (!isVerifiedOpenRouterRoute(model)) {
+      return source;
+    }
+    const output = createAssistantMessageEventStream();
+    const stream = output as unknown as { push(event: unknown): void; end(): void };
+    void (async () => {
+      try {
+        for await (const event of source as AsyncIterable<AssistantMessageEvent>) {
+          if (isDoneEvent(event)) {
+            await applyOpenRouterBilledCost({
+              apiKey: options?.apiKey,
+              message: event.message,
+              model,
+            });
+          }
+          stream.push(event);
+        }
+      } catch (error) {
+        stream.push({
+          type: "error",
+          reason: "error",
+          error: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: error instanceof Error ? error.message : String(error),
+          },
+        });
+      } finally {
+        stream.end();
+      }
+    })();
+    return output as ReturnType<StreamFn>;
+  };
+}
+
+function mergeOpenRouterAuthHeaders(options: Parameters<StreamFn>[2]): Parameters<StreamFn>[2] {
+  const apiKey = readString(options?.apiKey);
+  if (!apiKey) {
+    return options;
+  }
+  const headers = new Headers((options as { headers?: HeadersInit } | undefined)?.headers);
+  if (!headers.has("authorization")) {
+    headers.set("Authorization", `Bearer ${apiKey}`);
+  }
+  if (!headers.has("http-referer")) {
+    headers.set("HTTP-Referer", "https://openclaw.ai");
+  }
+  if (!headers.has("x-openrouter-title")) {
+    headers.set("X-OpenRouter-Title", "OpenClaw");
+  }
+  return {
+    ...options,
+    headers: Object.fromEntries(headers.entries()),
+  } as Parameters<StreamFn>[2];
+}
+
+function createOpenRouterAuthHeaderWrapper(
+  baseStreamFn: StreamFn | undefined,
+): StreamFn | undefined {
+  if (!baseStreamFn) {
+    return baseStreamFn;
+  }
+  return (model, context, options) =>
+    baseStreamFn(
+      model,
+      context,
+      isVerifiedOpenRouterRoute(model) ? mergeOpenRouterAuthHeaders(options) : options,
+    );
+}
+
+function assistantMessageHasOpenAIToolCalls(message: Record<string, unknown>): boolean {
+  return Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+}
+
+function isAnthropicToolCallContentBlock(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    ((value as { type?: unknown }).type === "tool_use" ||
+      (value as { type?: unknown }).type === "toolCall")
+  );
+}
+
+function assistantMessageHasAnthropicToolUse(message: Record<string, unknown>): boolean {
+  const content = message.content;
+  return Array.isArray(content) && content.some(isAnthropicToolCallContentBlock);
+}
+
+function shouldStripOpenRouterTrailingMessage(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const message = value as Record<string, unknown>;
+  return (
+    message.role === "assistant" &&
+    !assistantMessageHasOpenAIToolCalls(message) &&
+    !assistantMessageHasAnthropicToolUse(message)
+  );
+}
+
+function stripTrailingOpenRouterAssistantPrefillMessages(payload: Record<string, unknown>): number {
+  const messages = payload.messages;
+  if (!Array.isArray(messages)) {
+    return 0;
+  }
+
+  let keep = messages.length;
+  while (keep > 0 && shouldStripOpenRouterTrailingMessage(messages[keep - 1])) {
+    keep -= 1;
+  }
+  if (keep === messages.length) {
+    return 0;
+  }
+  const stripped = messages.length - keep;
+  messages.splice(keep);
+  return stripped;
 }
 
 function isEnabledReasoningValue(value: unknown): boolean {
@@ -85,6 +292,13 @@ function isEnabledReasoningValue(value: unknown): boolean {
     const normalized = value.trim().toLowerCase();
     return normalized !== "" && normalized !== "off" && normalized !== "none";
   }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const effort = (value as Record<string, unknown>).effort;
+    if (typeof effort === "string") {
+      const normalized = effort.trim().toLowerCase();
+      return normalized !== "" && normalized !== "off" && normalized !== "none";
+    }
+  }
   return true;
 }
 
@@ -94,44 +308,35 @@ function isOpenRouterReasoningPayloadEnabled(payload: Record<string, unknown>): 
   );
 }
 
-function assistantMessageHasAnthropicToolUse(message: Record<string, unknown>): boolean {
-  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-    return true;
+function stripOpenRouterDeepSeekV4ReasoningContent(payload: Record<string, unknown>): void {
+  if (!Array.isArray(payload.messages)) {
+    return;
   }
-  const content = message.content;
-  if (!Array.isArray(content)) {
-    return false;
+  for (const message of payload.messages) {
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    delete (message as Record<string, unknown>).reasoning_content;
   }
-  return content.some(
-    (block) =>
-      block &&
-      typeof block === "object" &&
-      ((block as { type?: unknown }).type === "tool_use" ||
-        (block as { type?: unknown }).type === "toolCall"),
-  );
 }
 
-function stripTrailingAssistantPrefillMessages(payload: Record<string, unknown>): number {
+function backfillOpenRouterDeepSeekV4ReasoningContent(payload: Record<string, unknown>): void {
   if (!Array.isArray(payload.messages)) {
-    return 0;
+    return;
   }
-
-  let stripped = 0;
-  while (payload.messages.length > 0) {
-    const finalMessage = payload.messages[payload.messages.length - 1];
-    if (!finalMessage || typeof finalMessage !== "object") {
-      break;
+  for (const message of payload.messages) {
+    if (!message || typeof message !== "object") {
+      continue;
     }
-
-    const message = finalMessage as Record<string, unknown>;
-    if (message.role !== "assistant" || assistantMessageHasAnthropicToolUse(message)) {
-      break;
+    const record = message as Record<string, unknown>;
+    if (
+      record.role === "assistant" &&
+      !assistantMessageHasOpenAIToolCalls(record) &&
+      !("reasoning_content" in record)
+    ) {
+      record.reasoning_content = "";
     }
-
-    payload.messages.pop();
-    stripped += 1;
   }
-  return stripped;
 }
 
 function injectOpenRouterRouting(
@@ -141,7 +346,7 @@ function injectOpenRouterRouting(
   if (!providerRouting) {
     return baseStreamFn;
   }
-  return (model, context, options) =>
+  const routedStreamFn: StreamFn = (model, context, options) =>
     (
       baseStreamFn ??
       ((nextModel) => {
@@ -157,6 +362,17 @@ function injectOpenRouterRouting(
       context,
       options,
     );
+  return createPayloadPatchStreamWrapper(
+    routedStreamFn,
+    ({ payload }) => {
+      if (payload.provider === undefined) {
+        payload.provider = providerRouting;
+      }
+    },
+    {
+      shouldPatch: ({ model }) => shouldPatchOpenRouterRoutingPayload(model),
+    },
+  );
 }
 
 function createOpenRouterAnthropicPrefillWrapper(baseStreamFn: StreamFn | undefined): StreamFn {
@@ -166,7 +382,7 @@ function createOpenRouterAnthropicPrefillWrapper(baseStreamFn: StreamFn | undefi
       if (!isOpenRouterReasoningPayloadEnabled(payload)) {
         return;
       }
-      const stripped = stripTrailingAssistantPrefillMessages(payload);
+      const stripped = stripTrailingOpenRouterAssistantPrefillMessages(payload);
       if (stripped > 0) {
         log.warn(
           `removed ${stripped} trailing assistant prefill message${stripped === 1 ? "" : "s"} because OpenRouter-routed Anthropic reasoning requires conversations to end with a user turn`,
@@ -179,16 +395,55 @@ function createOpenRouterAnthropicPrefillWrapper(baseStreamFn: StreamFn | undefi
   );
 }
 
-function createOpenRouterDeepSeekV4ThinkingWrapper(
+function resolveOpenRouterDeepSeekV4ReasoningEffort(
+  thinkingLevel: ProviderWrapStreamFnContext["thinkingLevel"],
+): "high" | "xhigh" | undefined {
+  if (thinkingLevel === "off") {
+    return undefined;
+  }
+  if (thinkingLevel === "xhigh" || thinkingLevel === "max") {
+    return "xhigh";
+  }
+  return "high";
+}
+
+function applyOpenRouterDeepSeekV4ReasoningEffort(
+  payload: Record<string, unknown>,
+  thinkingLevel: ProviderWrapStreamFnContext["thinkingLevel"],
+): boolean {
+  const effort = resolveOpenRouterDeepSeekV4ReasoningEffort(thinkingLevel);
+  if (!effort) {
+    delete payload.reasoning;
+    return false;
+  }
+  const reasoning =
+    payload.reasoning && typeof payload.reasoning === "object" && !Array.isArray(payload.reasoning)
+      ? (payload.reasoning as Record<string, unknown>)
+      : {};
+  reasoning.effort = effort;
+  payload.reasoning = reasoning;
+  return true;
+}
+
+function createOpenRouterDeepSeekV4ReplayWrapper(
   baseStreamFn: StreamFn | undefined,
   thinkingLevel: ProviderWrapStreamFnContext["thinkingLevel"],
-): StreamFn | undefined {
-  return createDeepSeekV4OpenAICompatibleThinkingWrapper({
+): StreamFn {
+  return createPayloadPatchStreamWrapper(
     baseStreamFn,
-    thinkingLevel,
-    shouldPatchModel: shouldPatchDeepSeekV4OpenRouterPayload,
-    resolveReasoningEffort: resolveOpenRouterDeepSeekV4ReasoningEffort,
-  });
+    ({ payload }) => {
+      delete payload.thinking;
+      delete payload.reasoning_effort;
+      if (!applyOpenRouterDeepSeekV4ReasoningEffort(payload, thinkingLevel)) {
+        stripOpenRouterDeepSeekV4ReasoningContent(payload);
+        return;
+      }
+      backfillOpenRouterDeepSeekV4ReasoningContent(payload);
+    },
+    {
+      shouldPatch: ({ model }) => shouldPatchDeepSeekV4OpenRouterPayload(model),
+    },
+  );
 }
 
 export function wrapOpenRouterProviderStream(
@@ -203,8 +458,12 @@ export function wrapOpenRouterProviderStream(
     : ctx.streamFn;
   const wrapStreamFn = OPENROUTER_THINKING_STREAM_HOOKS.wrapStreamFn ?? undefined;
   if (!wrapStreamFn) {
-    return createOpenRouterAnthropicPrefillWrapper(
-      createOpenRouterDeepSeekV4ThinkingWrapper(routedStreamFn, ctx.thinkingLevel),
+    return createOpenRouterBilledCostWrapper(
+      createOpenRouterAnthropicPrefillWrapper(
+        createOpenRouterAuthHeaderWrapper(
+          createOpenRouterDeepSeekV4ReplayWrapper(routedStreamFn, ctx.thinkingLevel),
+        ),
+      ),
     );
   }
   const wrappedStreamFn =
@@ -215,7 +474,11 @@ export function wrapOpenRouterProviderStream(
         ? undefined
         : ctx.thinkingLevel,
     }) ?? undefined;
-  return createOpenRouterAnthropicPrefillWrapper(
-    createOpenRouterDeepSeekV4ThinkingWrapper(wrappedStreamFn, ctx.thinkingLevel),
+  return createOpenRouterBilledCostWrapper(
+    createOpenRouterAnthropicPrefillWrapper(
+      createOpenRouterAuthHeaderWrapper(
+        createOpenRouterDeepSeekV4ReplayWrapper(wrappedStreamFn, ctx.thinkingLevel),
+      ),
+    ),
   );
 }

@@ -1,3 +1,4 @@
+// Tests subagent focus commands, active target state, and reply copy.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
@@ -41,7 +42,7 @@ function buildFocusSessionBindingService() {
   };
 }
 
-vi.mock("../../acp/runtime/session-identifiers.js", () => ({
+vi.mock("@openclaw/acp-core/runtime/session-identifiers", () => ({
   resolveAcpSessionCwd: () => undefined,
   resolveAcpThreadSessionDetailLines: (params: {
     meta?: { identity?: Record<string, unknown> };
@@ -179,13 +180,17 @@ type SessionBindingBindInput = {
 
 function firstFocusTargetSessionParams(): FocusTargetSessionParams {
   const firstCall = hoisted.resolveFocusTargetSessionMock.mock.calls[0];
-  expect(firstCall).toBeDefined();
+  if (!firstCall) {
+    throw new Error("Expected focus target session call");
+  }
   return firstCall[0] as FocusTargetSessionParams;
 }
 
 function firstSessionBindingBindInput(): SessionBindingBindInput {
   const firstCall = hoisted.sessionBindingBindMock.mock.calls[0];
-  expect(firstCall).toBeDefined();
+  if (!firstCall) {
+    throw new Error("Expected session binding bind call");
+  }
   return firstCall[0] as SessionBindingBindInput;
 }
 

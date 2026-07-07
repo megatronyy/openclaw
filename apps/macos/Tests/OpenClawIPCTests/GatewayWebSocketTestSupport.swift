@@ -36,6 +36,15 @@ enum GatewayWebSocketTestSupport {
         return obj["params"] as? [String: Any]
     }
 
+    static func connectScopes(from message: URLSessionWebSocketTask.Message) -> [String]? {
+        guard let obj = self.requestFrameObject(from: message) else { return nil }
+        guard (obj["type"] as? String) == "req", (obj["method"] as? String) == "connect" else {
+            return nil
+        }
+        let params = obj["params"] as? [String: Any]
+        return params?["scopes"] as? [String]
+    }
+
     static func connectOkData(id: String) -> Data {
         let json = """
         {
@@ -166,6 +175,10 @@ final class GatewayTestWebSocketTask: WebSocketTasking, @unchecked Sendable {
         self.lock.withLock { self.connectRequestID }
     }
 
+    func snapshotSendCount() -> Int {
+        self.lock.withLock { self.sendCount }
+    }
+
     func resume() {
         self.state = .running
     }
@@ -254,7 +267,11 @@ final class GatewayTestWebSocketSession: WebSocketSessioning, @unchecked Sendabl
     }
 
     func makeWebSocketTask(url: URL) -> WebSocketTaskBox {
-        _ = url
+        self.makeWebSocketTask(request: URLRequest(url: url))
+    }
+
+    func makeWebSocketTask(request: URLRequest) -> WebSocketTaskBox {
+        _ = request
         let task = self.taskFactory()
         self.lock.withLock {
             self.makeCount += 1

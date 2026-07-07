@@ -1,14 +1,15 @@
+/** Classifies ACP tool permission requests into auto-approved and prompt-required risk buckets. */
 import { homedir } from "node:os";
 import path from "node:path";
-import { isKnownCoreToolId } from "../agents/tool-catalog.js";
-import { isMutatingToolCall } from "../agents/tool-mutation.js";
-import { resolveOwnerOnlyToolApprovalClass } from "../agents/tool-policy.js";
-import { isPathInside } from "../infra/path-guards.js";
+import { asRecord } from "@openclaw/acp-core/record-shared";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
-} from "../shared/string-coerce.js";
-import { asRecord } from "./record-shared.js";
+} from "@openclaw/normalization-core/string-coerce";
+import { isKnownCoreToolId } from "../agents/tool-catalog.js";
+import { isMutatingToolCall } from "../agents/tool-mutation.js";
+import { isPathInside } from "../infra/path-guards.js";
+import { readTrimmedStringAlias } from "../utils/string-readers.js";
 
 const SAFE_SEARCH_TOOL_IDS = new Set(["search", "web_search", "memory_search"]);
 const TRUSTED_SAFE_TOOL_ALIASES = new Set(["search"]);
@@ -19,8 +20,15 @@ const EXEC_CAPABLE_TOOL_IDS = new Set([
   "bash",
   "process",
   "code_execution",
+  "nodes",
 ]);
-const CONTROL_PLANE_TOOL_IDS = new Set(["sessions_spawn", "sessions_send", "session_status"]);
+const CONTROL_PLANE_TOOL_IDS = new Set([
+  "cron",
+  "gateway",
+  "sessions_spawn",
+  "sessions_send",
+  "session_status",
+]);
 
 export type AcpApprovalClass =
   | "readonly_scoped"
@@ -45,13 +53,7 @@ function readFirstStringValue(
   if (!source) {
     return undefined;
   }
-  for (const key of keys) {
-    const value = normalizeOptionalString(source[key]);
-    if (value) {
-      return value;
-    }
-  }
-  return undefined;
+  return readTrimmedStringAlias(source, keys);
 }
 
 function normalizeToolName(value: string): string | undefined {
@@ -78,7 +80,7 @@ function resolveToolNameForPermission(params: {
   };
 }): string | undefined {
   const toolCall = params.toolCall;
-  const toolMeta = asRecord(toolCall?._meta);
+  const toolMeta = asRecord(toolCall?.["_meta"]);
   const rawInput = asRecord(toolCall?.rawInput);
 
   const fromMeta = readFirstStringValue(toolMeta, ["toolName", "tool_name", "name"]);
@@ -179,6 +181,7 @@ function isReadToolCallScopedToCwd(
   return isPathInside(path.resolve(cwd), absolutePath);
 }
 
+/** Resolves the ACP approval class for one tool call, failing closed on spoofed tool identity. */
 export function classifyAcpToolApproval(params: {
   toolCall?: {
     title?: string | null;
@@ -208,10 +211,6 @@ export function classifyAcpToolApproval(params: {
   }
   if (SAFE_SEARCH_TOOL_IDS.has(toolName) && isTrustedToolId) {
     return { toolName, approvalClass: "readonly_search", autoApprove: true };
-  }
-  const ownerOnlyApprovalClass = resolveOwnerOnlyToolApprovalClass(toolName);
-  if (ownerOnlyApprovalClass) {
-    return { toolName, approvalClass: ownerOnlyApprovalClass, autoApprove: false };
   }
   if (EXEC_CAPABLE_TOOL_IDS.has(toolName)) {
     return { toolName, approvalClass: "exec_capable", autoApprove: false };

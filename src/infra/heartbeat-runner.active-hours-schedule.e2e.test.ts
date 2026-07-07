@@ -1,3 +1,4 @@
+// Covers heartbeat scheduling within active hours.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { startHeartbeatRunner } from "./heartbeat-runner.js";
@@ -109,6 +110,46 @@ describe("heartbeat scheduler: activeHours-aware scheduling (#75487)", () => {
 
     expect(runSpy).toHaveBeenCalledTimes(1);
     runner.stop();
+  });
+
+  it("runs a bounded real scheduler with active-hours enabled", async () => {
+    const startedAt = Date.now();
+    let resolveRun: (() => void) | undefined;
+    const ran = new Promise<void>((resolve) => {
+      resolveRun = resolve;
+    });
+    const runSpy: RunOnce = vi.fn().mockImplementation(async () => {
+      resolveRun?.();
+      return { status: "ran", durationMs: 1 };
+    });
+    const runner = startHeartbeatRunner({
+      cfg: heartbeatConfig({
+        every: "50ms",
+        activeHours: { start: "00:00", end: "24:00", timezone: "UTC" },
+      }),
+      runOnce: runSpy,
+      stableSchedulerSeed: TEST_SCHEDULER_SEED,
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      await Promise.race([
+        ran,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("real heartbeat scheduler did not fire")),
+            2_000,
+          );
+        }),
+      ]);
+      expect(runSpy).toHaveBeenCalled();
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      runner.stop();
+    }
   });
 
   it("seeks forward correctly with a non-UTC timezone (e.g. America/New_York)", async () => {

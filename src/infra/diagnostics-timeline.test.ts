@@ -1,3 +1,4 @@
+// Covers diagnostics timeline event writing and spans.
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   emitDiagnosticsTimelineEvent,
-  flushDiagnosticsTimelineForTest,
   isDiagnosticsTimelineEnabled,
   measureDiagnosticsTimelineSpan,
   measureDiagnosticsTimelineSpanSync,
@@ -28,7 +28,7 @@ async function createTimelineEnv() {
 }
 
 async function readTimeline(path: string) {
-  await flushDiagnosticsTimelineForTest();
+  await Promise.resolve();
   return (await readFile(path, "utf8"))
     .trim()
     .split("\n")
@@ -37,14 +37,20 @@ async function readTimeline(path: string) {
 
 function eventRecord(events: Record<string, unknown>[], index: number): Record<string, unknown> {
   const event = events[index];
-  expect(event).toBeTruthy();
+  if (!event) {
+    throw new Error(`Expected diagnostics event at index ${index}`);
+  }
   return event;
 }
 
 function attributesRecord(event: Record<string, unknown>): Record<string, unknown> {
-  expect(event.attributes).toBeTruthy();
-  expect(typeof event.attributes).toBe("object");
-  expect(Array.isArray(event.attributes)).toBe(false);
+  if (
+    !event.attributes ||
+    typeof event.attributes !== "object" ||
+    Array.isArray(event.attributes)
+  ) {
+    throw new Error("Expected diagnostics event attributes");
+  }
   return event.attributes as Record<string, unknown>;
 }
 
@@ -200,6 +206,30 @@ describe("diagnostics timeline", () => {
     expect(errorEvent.phase).toBe("startup");
     expect(errorEvent.errorName).toBe("TypeError");
     expect(errorEvent.errorMessage).toBe("bad plugin");
+  });
+
+  it("can omit sensitive span error messages", async () => {
+    const { env, path } = await createTimelineEnv();
+
+    await expect(
+      measureDiagnosticsTimelineSpan(
+        "secrets.prepare",
+        () => {
+          throw new Error('Secret provider "prod" failed for ref "TOKEN_ID"');
+        },
+        { env, omitErrorMessage: true, phase: "startup" },
+      ),
+    ).rejects.toThrow("TOKEN_ID");
+
+    const events = await readTimeline(path);
+    expect(events).toHaveLength(2);
+    const errorEvent = eventRecord(events, 1);
+    expect(errorEvent.type).toBe("span.error");
+    expect(errorEvent.name).toBe("secrets.prepare");
+    expect(errorEvent.errorName).toBe("Error");
+    expect(errorEvent.errorMessage).toBeUndefined();
+    expect(JSON.stringify(events)).not.toContain("TOKEN_ID");
+    expect(JSON.stringify(events)).not.toContain("prod");
   });
 
   it("records synchronous spans", async () => {

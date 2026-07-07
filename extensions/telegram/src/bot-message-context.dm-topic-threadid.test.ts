@@ -1,3 +1,4 @@
+// Telegram tests cover bot message contextm topic threadid plugin behavior.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getRecordedUpdateLastRoute,
@@ -12,8 +13,17 @@ vi.mock("./bot-message-context.body.js", () => ({
     historyKey: undefined,
     commandAuthorized: false,
     effectiveWasMentioned: true,
+    inboundEventKind: "user_request",
+    mentionFacts: {
+      canDetectMention: false,
+      wasMentioned: true,
+      effectiveWasMentioned: true,
+      requireMention: false,
+      shouldSkip: false,
+    },
     canDetectMention: false,
     shouldBypassMention: false,
+    hasControlCommand: false,
     stickerCacheHit: false,
     locationData: undefined,
   }),
@@ -78,8 +88,8 @@ describe("buildTelegramMessageContext DM topic threadId in deliveryContext (#889
   });
 
   it("builds Telegram payloads through the shared channel turn context", async () => {
-    const { buildChannelTurnContext } = await import("openclaw/plugin-sdk/channel-inbound");
-    const buildChannelTurnContextMock = vi.fn(buildChannelTurnContext);
+    const { buildChannelInboundEventContext } = await import("openclaw/plugin-sdk/channel-inbound");
+    const buildChannelInboundEventContextMock = vi.fn(buildChannelInboundEventContext);
 
     const ctx = await buildCtx({
       message: {
@@ -91,35 +101,48 @@ describe("buildTelegramMessageContext DM topic threadId in deliveryContext (#889
           text: "parent",
           from: { id: 99, first_name: "Bob" },
         },
+        from: { id: 42, first_name: "Alice", username: "alice_bot", is_bot: true },
       },
       sessionRuntime: {
-        buildChannelTurnContext: buildChannelTurnContextMock,
+        buildChannelInboundEventContext:
+          buildChannelInboundEventContextMock as unknown as typeof buildChannelInboundEventContext,
       },
     });
 
     expect(ctx?.ctxPayload.ReplyToBody).toBe("parent");
-    expect(buildChannelTurnContextMock).toHaveBeenCalledOnce();
-    expect(buildChannelTurnContextMock.mock.calls[0]?.[0]).toMatchObject({
-      channel: "telegram",
-      from: "telegram:1234",
+    expect(ctx?.ctxPayload.SenderIsBot).toBe(true);
+    expect(buildChannelInboundEventContextMock).toHaveBeenCalledOnce();
+    const [turnOptions] = buildChannelInboundEventContextMock.mock.calls.at(0) ?? [];
+    expect(turnOptions?.channel).toBe("telegram");
+    expect(turnOptions?.from).toBe("telegram:1234");
+    expect(turnOptions?.sender?.isBot).toBe(true);
+    expect(turnOptions?.message.rawBody).toBe("hello");
+    expect(turnOptions?.message.bodyForAgent).toBe("hello");
+    expect(turnOptions?.reply?.to).toBe("telegram:1234");
+    expect(turnOptions?.reply?.originatingTo).toBeUndefined();
+    expect(turnOptions?.reply?.replyToId).toBe("9");
+    expect(turnOptions?.supplemental?.quote?.id).toBe("9");
+    expect(turnOptions?.supplemental?.quote?.body).toBe("parent");
+    expect(turnOptions?.supplemental?.quote?.sender).toBe("Bob");
+    expect(turnOptions?.supplemental?.quote?.senderAllowed).toBe(true);
+  });
+
+  it("preserves voice-note source modality without treating ordinary audio as voice", async () => {
+    const voiceCtx = await buildCtx({
       message: {
-        rawBody: "hello",
-        bodyForAgent: "hello",
-      },
-      reply: {
-        to: "telegram:1234",
-        originatingTo: "telegram:1234",
-        replyToId: "9",
-      },
-      supplemental: {
-        quote: {
-          id: "9",
-          body: "parent",
-          sender: "Bob",
-          senderAllowed: true,
-        },
+        chat: { id: 1234, type: "private" },
+        voice: { file_id: "voice-1" },
       },
     });
+    const audioCtx = await buildCtx({
+      message: {
+        chat: { id: 1234, type: "private" },
+        audio: { file_id: "audio-1" },
+      },
+    });
+
+    expect(voiceCtx?.ctxPayload.SourceModality).toBe("voice");
+    expect(audioCtx?.ctxPayload.SourceModality).toBeUndefined();
   });
 
   it("does not pass threadId for regular DM without topic", async () => {

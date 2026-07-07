@@ -1,3 +1,4 @@
+// Tlon tests cover tlon api plugin behavior.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { authenticate } from "./urbit/auth.js";
 import { scryUrbitPath } from "./urbit/channel-ops.js";
@@ -62,6 +63,14 @@ function createGuardedResult(response: Response, finalUrl: string) {
   };
 }
 
+function guardedFetchCall(index: number): Parameters<typeof fetchWithSsrFGuard>[0] {
+  const call = mockGuardedFetch.mock.calls[index]?.at(0);
+  if (call === undefined) {
+    throw new Error(`expected guarded fetch call ${index}`);
+  }
+  return call;
+}
+
 describe("uploadFile memex upload hardening", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -123,7 +132,7 @@ describe("uploadFile memex upload hardening", () => {
     expect(result).toEqual({ url: "https://memex.tlon.network/files/uploaded.png" });
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
     expect(mockGuardedFetch).toHaveBeenCalledTimes(2);
-    const firstCall = mockGuardedFetch.mock.calls[0]?.[0];
+    const firstCall = guardedFetchCall(0);
     expect(firstCall?.url).toBe("https://memex.tlon.network/v1/zod/upload");
     expect(firstCall?.init?.method).toBe("PUT");
     expect(firstCall?.init?.headers).toEqual({ "Content-Type": "application/json" });
@@ -137,7 +146,7 @@ describe("uploadFile memex upload hardening", () => {
     expect(firstBody.contentLength).toBe(11);
     expect(firstBody.contentType).toBe("image/png");
     expect(typeof firstBody.fileName).toBe("string");
-    const secondCall = mockGuardedFetch.mock.calls[1]?.[0];
+    const secondCall = guardedFetchCall(1);
     expect(secondCall?.url).toBe("https://uploads.tlon.network/put");
     expect(secondCall?.init?.method).toBe("PUT");
     expect(secondCall?.init?.headers).toEqual({
@@ -171,7 +180,7 @@ describe("uploadFile memex upload hardening", () => {
 
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
     expect(mockGuardedFetch).toHaveBeenCalledTimes(2);
-    const uploadCall = mockGuardedFetch.mock.calls[1]?.[0];
+    const uploadCall = guardedFetchCall(1);
     expect(uploadCall?.url).toBe("https://uploads.tlon.network/put");
     expect(uploadCall?.auditContext).toBe("tlon-memex-upload");
     expect(uploadCall?.capture).toBe(false);
@@ -272,11 +281,44 @@ describe("uploadFile memex upload hardening", () => {
 
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
     expect(mockGuardedFetch).toHaveBeenCalledTimes(2);
-    const uploadCall = mockGuardedFetch.mock.calls[1]?.[0];
+    const uploadCall = guardedFetchCall(1);
     expect(uploadCall?.url).toBe("https://uploads.tlon.network/put");
     expect(uploadCall?.auditContext).toBe("tlon-memex-upload");
     expect(uploadCall?.capture).toBe(false);
     expect(uploadCall?.maxRedirects).toBe(0);
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an oversized Memex upload JSON response", async () => {
+    const cancelBody = vi.fn();
+    let bodyReads = 0;
+    mockGuardedFetch.mockResolvedValueOnce(
+      createGuardedResult(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              bodyReads += 1;
+              controller.enqueue(new Uint8Array(32 * 1024).fill(120));
+            },
+            cancel: cancelBody,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+        "https://memex.tlon.network/v1/zod/upload",
+      ),
+    );
+
+    await expect(
+      uploadFile({
+        blob: new Blob(["image-bytes"], { type: "image/png" }),
+        fileName: "avatar.png",
+        contentType: "image/png",
+      }),
+    ).rejects.toThrow("Memex upload: JSON response exceeds 65536 bytes");
+
+    expect(mockGuardedFetch).toHaveBeenCalledTimes(1);
+    expect(bodyReads).toBeLessThan(10);
+    expect(cancelBody).toHaveBeenCalledTimes(1);
     expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 
@@ -387,7 +429,7 @@ describe("uploadFile memex upload hardening", () => {
 
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
     expect(mockGuardedFetch).toHaveBeenCalledTimes(1);
-    const lookupCall = mockGuardedFetch.mock.calls[0]?.[0];
+    const lookupCall = guardedFetchCall(0);
     expect(lookupCall?.url).toBe("https://memex.tlon.network/v1/zod/upload");
     expect(lookupCall?.auditContext).toBe("tlon-memex-upload-url");
     expect(lookupCall?.capture).toBe(false);
@@ -455,7 +497,7 @@ describe("uploadFile custom S3 upload hardening", () => {
 
     expect(result.url.startsWith("https://files.example.com/")).toBe(true);
     expect(mockGuardedFetch).toHaveBeenCalledTimes(1);
-    const uploadCall = mockGuardedFetch.mock.calls[0]?.[0];
+    const uploadCall = guardedFetchCall(0);
     expect(uploadCall?.url).toBe("https://s3.example.com/uploads/file?sig=abc");
     expect(uploadCall?.init?.method).toBe("PUT");
     expect(uploadCall?.init?.headers).toBeUndefined();
@@ -508,7 +550,7 @@ describe("uploadFile custom S3 upload hardening", () => {
 
     expect(result.url.startsWith("https://files.example.com/")).toBe(true);
     expect(mockGuardedFetch).toHaveBeenCalledTimes(1);
-    const uploadCall = mockGuardedFetch.mock.calls[0]?.[0];
+    const uploadCall = guardedFetchCall(0);
     expect(uploadCall?.url).toBe("https://10.0.0.15/uploads/file?sig=abc");
     expect(uploadCall?.auditContext).toBe("tlon-custom-s3-upload");
     expect(uploadCall?.capture).toBe(false);

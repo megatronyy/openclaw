@@ -6,8 +6,13 @@
   "enabledByDefault": true,
   "providerCatalogEntry": "./provider-discovery.ts",
   "providers": ["byteplus", "byteplus-plan"],
-  "providerAuthEnvVars": {
-    "byteplus": ["BYTEPLUS_API_KEY"]
+  "setup": {
+    "providers": [
+      {
+        "id": "byteplus",
+        "envVars": ["BYTEPLUS_API_KEY"]
+      }
+    ]
   },
   "providerAuthAliases": {
     "byteplus-plan": "byteplus"
@@ -144,6 +149,7 @@
       "provider": "byteplus",
       "method": "api-key",
       "choiceId": "byteplus-api-key",
+      "appGuidedSecret": true,
       "choiceLabel": "BytePlus API key",
       "groupId": "byteplus",
       "groupLabel": "BytePlus",

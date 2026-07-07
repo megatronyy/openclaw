@@ -1,3 +1,4 @@
+// Zalo plugin module implements channel behavior.
 import { describeWebhookAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
 import { formatAllowFromLowercase } from "openclaw/plugin-sdk/allow-from";
@@ -13,7 +14,7 @@ import {
   createChatChannelPlugin,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk/channel-core";
-import { defineChannelMessageAdapter } from "openclaw/plugin-sdk/channel-message";
+import { defineChannelMessageAdapter } from "openclaw/plugin-sdk/channel-outbound";
 import {
   buildOpenGroupPolicyRestrictSendersWarning,
   buildOpenGroupPolicyWarning,
@@ -303,6 +304,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount, ZaloProbeResult> =
           sendText: (nextCtx) => zaloRawSendResultAdapter.sendText!(nextCtx),
           sendMedia: (nextCtx) => zaloRawSendResultAdapter.sendMedia!(nextCtx),
           emptyResult: createEmptyChannelResult("zalo"),
+          onResult: ctx.onDeliveryResult,
         }),
       ...zaloRawSendResultAdapter,
     },

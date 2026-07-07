@@ -1,3 +1,4 @@
+// Doctor workspace tests cover workspace path checks, repairs, and user-facing notes.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,7 +8,7 @@ import type { DoctorPrompter } from "./doctor-prompter.js";
 
 const note = vi.hoisted(() => vi.fn());
 
-vi.mock("../terminal/note.js", () => ({
+vi.mock("../../packages/terminal-core/src/note.js", () => ({
   note,
 }));
 
@@ -28,6 +29,10 @@ async function expectPathMissing(targetPath: string): Promise<void> {
     return;
   }
   throw new Error(`expected path to be missing: ${targetPath}`);
+}
+
+function firstNoteCall() {
+  return note.mock.calls[0];
 }
 
 describe("root memory repair", () => {
@@ -98,10 +103,12 @@ describe("root memory repair", () => {
     } as unknown as DoctorPrompter;
 
     await noteWorkspaceMemoryHealth(cfg);
-    expect(note).toHaveBeenCalledWith(
-      expect.stringContaining("Split root durable memory"),
-      "Workspace memory",
-    );
+    const detection = await detectRootMemoryFiles(tmpDir);
+    const expectedWarning = formatRootMemoryFilesWarning(detection);
+    if (!expectedWarning) {
+      throw new Error("expected split root memory warning");
+    }
+    expect(note).toHaveBeenCalledWith(expectedWarning, "Workspace memory");
     note.mockClear();
 
     await maybeRepairWorkspaceMemoryHealth({ cfg, prompter });
@@ -113,9 +120,16 @@ describe("root memory repair", () => {
     const canonical = await fs.readFile(path.join(tmpDir, "MEMORY.md"), "utf8");
     expect(canonical).toContain("# Legacy");
     await expectPathMissing(path.join(tmpDir, "memory.md"));
-    expect(note).toHaveBeenCalledWith(
-      expect.stringContaining("Workspace memory root merged:"),
-      "Doctor changes",
+    expect(note).toHaveBeenCalledTimes(1);
+    const repairNote = firstNoteCall();
+    const repairMessage = String(repairNote?.[0] ?? "");
+    const repairLines = repairMessage.split("\n");
+    expect(repairLines[0]).toBe("Workspace memory root merged:");
+    expect(repairLines).toContain(`- canonical: ${path.join(tmpDir, "MEMORY.md")}`);
+    expect(repairLines).toContain(
+      `- merged legacy content from: ${path.join(tmpDir, "memory.md")}`,
     );
+    expect(repairLines).toContain(`- removed legacy file: ${path.join(tmpDir, "memory.md")}`);
+    expect(repairNote?.[1]).toBe("Doctor changes");
   });
 });

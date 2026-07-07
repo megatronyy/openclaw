@@ -1,3 +1,4 @@
+// Discord tests cover channel plugin behavior.
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { ChannelType } from "discord-api-types/v10";
@@ -93,6 +94,25 @@ function installDiscordRuntime(discord: Record<string, unknown>) {
   } as unknown as PluginRuntime);
 }
 
+async function expectStaleProbeMetadataCleared(statusPatches: Array<Record<string, unknown>>) {
+  await vi.waitFor(() =>
+    expect(
+      statusPatches
+        .filter(
+          (patch) =>
+            "bot" in patch &&
+            "application" in patch &&
+            patch.bot === undefined &&
+            patch.application === undefined,
+        )
+        .map((patch) => ({
+          bot: patch.bot,
+          application: patch.application,
+        })),
+    ).toEqual([{ bot: undefined, application: undefined }]),
+  );
+}
+
 type MockWithCalls = {
   mock: { calls: unknown[][] };
 };
@@ -110,7 +130,11 @@ function objectArgAt(
 }
 
 function argAt(mock: MockWithCalls, callIndex: number, argIndex: number): unknown {
-  return mock.mock.calls[callIndex]?.[argIndex];
+  const call = mock.mock.calls[callIndex];
+  if (!call || !(argIndex in call)) {
+    throw new Error(`expected call ${callIndex} argument ${argIndex}`);
+  }
+  return call[argIndex];
 }
 
 function recordField(value: unknown, field: string): Record<string, unknown> {
@@ -157,7 +181,7 @@ describe("discordPlugin outbound", () => {
     expect(discordPlugin.outbound?.preferFinalAssistantVisibleText).toBe(true);
   });
 
-  it("routes read and search actions through the gateway", () => {
+  it("routes Discord message actions through the gateway", () => {
     expect(discordPlugin.actions?.resolveExecutionMode?.({ action: "read" as never })).toBe(
       "gateway",
     );
@@ -166,6 +190,15 @@ describe("discordPlugin outbound", () => {
     );
     expect(discordPlugin.actions?.resolveExecutionMode?.({ action: "send" as never })).toBe(
       "local",
+    );
+    expect(discordPlugin.actions?.resolveExecutionMode?.({ action: "upload-file" as never })).toBe(
+      "local",
+    );
+    expect(discordPlugin.actions?.resolveExecutionMode?.({ action: "thread-reply" as never })).toBe(
+      "local",
+    );
+    expect(discordPlugin.actions?.resolveExecutionMode?.({ action: "channel-info" as never })).toBe(
+      "gateway",
     );
   });
 
@@ -177,28 +210,20 @@ describe("discordPlugin outbound", () => {
     );
   });
 
-  it("preserves normalized explicit Discord targets for delivery routing", () => {
-    const parseExplicitTarget = discordPlugin.messaging?.parseExplicitTarget;
-    if (!parseExplicitTarget) {
-      throw new Error("Expected discordPlugin.messaging.parseExplicitTarget to be defined");
+  it("preserves normalized Discord targets for delivery routing", () => {
+    const messaging = discordPlugin.messaging;
+    if (!messaging?.normalizeTarget || !messaging.inferTargetChatType) {
+      throw new Error("Expected discordPlugin.messaging target helpers to be defined");
     }
 
-    expect(parseExplicitTarget({ raw: "user:123" })).toEqual({
-      to: "user:123",
-      chatType: "direct",
-    });
-    expect(parseExplicitTarget({ raw: "<@!456>" })).toEqual({
-      to: "user:456",
-      chatType: "direct",
-    });
-    expect(parseExplicitTarget({ raw: "channel:789" })).toEqual({
-      to: "channel:789",
-      chatType: "channel",
-    });
-    expect(parseExplicitTarget({ raw: "1470130713209602050" })).toEqual({
-      to: "channel:1470130713209602050",
-      chatType: "channel",
-    });
+    expect(messaging.normalizeTarget("user:123")).toBe("user:123");
+    expect(messaging.inferTargetChatType({ to: "user:123" })).toBe("direct");
+    expect(messaging.normalizeTarget("<@!456>")).toBe("user:456");
+    expect(messaging.inferTargetChatType({ to: "<@!456>" })).toBe("direct");
+    expect(messaging.normalizeTarget("channel:789")).toBe("channel:789");
+    expect(messaging.inferTargetChatType({ to: "channel:789" })).toBe("channel");
+    expect(messaging.normalizeTarget("1470130713209602050")).toBe("channel:1470130713209602050");
+    expect(messaging.inferTargetChatType({ to: "1470130713209602050" })).toBe("channel");
   });
 
   it("resolves Discord usernames through the messaging target resolver", async () => {
@@ -301,7 +326,7 @@ describe("discordPlugin outbound", () => {
     expect(sendOptions.mediaUrl).toBe("/tmp/image.png");
     expect(sendOptions.mediaLocalRoots).toEqual(["/tmp/agent-root"]);
     expect(sendOptions.mediaReadFile).toBe(mediaReadFile);
-    expect(sendOptions.replyTo).toBe("reply-123");
+    expect(sendOptions.reply).toEqual({ messageId: "reply-123", scope: "all" });
     expect(result.channel).toBe("discord");
     expect(result.messageId).toBe("m1");
   });
@@ -328,7 +353,10 @@ describe("discordPlugin outbound", () => {
     expect(sendMessageDiscord).toHaveBeenCalledTimes(2);
     expect(argAt(sendMessageDiscord, 0, 0)).toBe("channel:thread-123");
     expect(argAt(sendMessageDiscord, 0, 1)).toBe("done - tiny cyber-lobster clip incoming");
-    expect(objectArgAt(sendMessageDiscord, 0, 2).replyTo).toBe("reply-123");
+    expect(objectArgAt(sendMessageDiscord, 0, 2).reply).toEqual({
+      messageId: "reply-123",
+      scope: "all",
+    });
     expect(argAt(sendMessageDiscord, 1, 0)).toBe("channel:thread-123");
     expect(argAt(sendMessageDiscord, 1, 1)).toBe("");
     expect(objectArgAt(sendMessageDiscord, 1, 2).mediaUrl).toBe("/tmp/molty.mp4");
@@ -444,7 +472,7 @@ describe("discordPlugin outbound", () => {
         target: "channel:222",
       });
 
-      expect(fetchPermissionsSpy.mock.calls[0]?.[0]).toBe("222");
+      expect(argAt(fetchPermissionsSpy, 0, 0)).toBe("222");
       expect(objectArgAt(fetchPermissionsSpy, 0, 1).token).toBe("discord-token");
       const permissions = recordField(diagnostics?.details?.permissions, "permissions");
       expect(permissions.channelId).toBe("222");
@@ -452,6 +480,40 @@ describe("discordPlugin outbound", () => {
       expect(diagnostics?.lines?.map((line) => line.text).join("\n")).toContain(
         "Missing required: Connect, Speak, ReadMessageHistory",
       );
+    } finally {
+      fetchPermissionsSpy.mockRestore();
+    }
+  });
+
+  it("returns a timeout error when capabilities diagnostics exceed the timeout", async () => {
+    let diagnosticSignal: AbortSignal | undefined;
+    const fetchPermissionsSpy = vi
+      .spyOn(sendModule, "fetchChannelPermissionsDiscord")
+      .mockImplementation(
+        async (_channelId, opts) =>
+          await new Promise<never>((_, reject) => {
+            diagnosticSignal = opts.signal;
+            opts.signal?.addEventListener(
+              "abort",
+              () => reject(new Error("permission lookup aborted")),
+              { once: true },
+            );
+          }),
+      );
+    try {
+      const cfg = createCfg();
+      const diagnostics = await discordPlugin.status!.buildCapabilitiesDiagnostics!({
+        account: resolveAccount(cfg),
+        timeoutMs: 10,
+        cfg,
+        target: "channel:222",
+      });
+
+      const timeoutPerms = recordField(diagnostics?.details?.permissions, "permissions");
+      expect(String(timeoutPerms.error)).toContain("timed out");
+      expect(diagnostics?.lines?.[0]?.tone).toBe("error");
+      expect(objectArgAt(fetchPermissionsSpy, 0, 1).timeoutMs).toBe(10);
+      expect(diagnosticSignal?.aborted).toBe(true);
     } finally {
       fetchPermissionsSpy.mockRestore();
     }
@@ -498,6 +560,22 @@ describe("discordPlugin outbound", () => {
     expect(runtimeMonitorDiscordProvider).not.toHaveBeenCalled();
   });
 
+  it("fails loudly before provider startup when a token SecretRef is configured but unresolved", async () => {
+    const cfg = {
+      channels: {
+        discord: {
+          token: { source: "env", provider: "default", id: "DISCORD_BOT_TOKEN" },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    await expect(startDiscordAccount(cfg)).rejects.toThrow(
+      'Discord bot token configured for account "default" is unavailable',
+    );
+    expect(probeDiscordMock).not.toHaveBeenCalled();
+    expect(monitorDiscordProviderMock).not.toHaveBeenCalled();
+  });
+
   it("does not block Discord monitor startup on the startup probe", async () => {
     let resolveProbe:
       | ((value: {
@@ -508,8 +586,8 @@ describe("discordPlugin outbound", () => {
         }) => void)
       | undefined;
     probeDiscordMock.mockReturnValue(
-      new Promise((resolve) => {
-        resolveProbe = resolve;
+      new Promise((resolveLocal) => {
+        resolveProbe = resolveLocal;
       }),
     );
     monitorDiscordProviderMock.mockResolvedValue(undefined);
@@ -532,7 +610,7 @@ describe("discordPlugin outbound", () => {
         includeApplication: true,
       }),
     );
-    expect(statusPatches.some((patch) => "bot" in patch || "application" in patch)).toBe(false);
+    expect(statusPatches.filter((patch) => "bot" in patch || "application" in patch)).toEqual([]);
 
     if (!resolveProbe) {
       throw new Error("Expected Discord startup probe resolver to be initialized");
@@ -546,12 +624,20 @@ describe("discordPlugin outbound", () => {
 
     await vi.waitFor(() =>
       expect(
-        statusPatches.some(
-          (patch) =>
-            (patch.bot as { username?: string } | undefined)?.username === "AsyncBob" &&
-            Boolean(patch.application),
-        ),
-      ).toBe(true),
+        statusPatches
+          .filter(
+            (patch) => (patch.bot as { username?: string } | undefined)?.username === "AsyncBob",
+          )
+          .map((patch) => ({
+            bot: patch.bot,
+            application: patch.application,
+          })),
+      ).toEqual([
+        {
+          bot: { username: "AsyncBob" },
+          application: { intents: { messageContent: "limited" } },
+        },
+      ]),
     );
   });
 
@@ -579,17 +665,7 @@ describe("discordPlugin outbound", () => {
 
     await discordPlugin.gateway!.startAccount!(ctx);
 
-    await vi.waitFor(() =>
-      expect(
-        statusPatches.some(
-          (patch) =>
-            "bot" in patch &&
-            "application" in patch &&
-            patch.bot === undefined &&
-            patch.application === undefined,
-        ),
-      ).toBe(true),
-    );
+    await expectStaleProbeMetadataCleared(statusPatches);
   });
 
   it("clears stale Discord probe metadata when the async startup probe throws", async () => {
@@ -611,17 +687,7 @@ describe("discordPlugin outbound", () => {
 
     await discordPlugin.gateway!.startAccount!(ctx);
 
-    await vi.waitFor(() =>
-      expect(
-        statusPatches.some(
-          (patch) =>
-            "bot" in patch &&
-            "application" in patch &&
-            patch.bot === undefined &&
-            patch.application === undefined,
-        ),
-      ).toBe(true),
-    );
+    await expectStaleProbeMetadataCleared(statusPatches);
   });
 
   it("stagger starts later accounts in multi-bot setups", async () => {

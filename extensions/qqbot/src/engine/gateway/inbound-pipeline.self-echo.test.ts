@@ -1,3 +1,4 @@
+// Qqbot tests cover inbound pipeline.self echo plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { QQBotInboundAccess } from "../adapter/index.js";
 import type { RefIndexEntry } from "../ref/types.js";
@@ -91,7 +92,7 @@ function makeRuntime(): GatewayPluginRuntime {
         resolveStorePath: vi.fn(() => "/tmp/openclaw/qqbot-sessions.json"),
         recordInboundSession: vi.fn(async () => undefined),
       },
-      turn: {
+      inbound: {
         run: vi.fn(async (rawParams: unknown) => {
           const params = rawParams as {
             raw: unknown;
@@ -271,9 +272,10 @@ describe("buildInboundContext bot self-echo suppression", () => {
     expect(getRefIndexMock).toHaveBeenCalledWith("REF_BOT");
     expect(formatRefEntryForAgentMock).toHaveBeenCalled();
     expect(inbound.blocked).toBe(false);
-    expect(inbound.replyTo).toMatchObject({
+    expect(inbound.replyTo).toStrictEqual({
       id: "REF_BOT",
       body: "bot reply",
+      sender: "qq-main",
       isQuote: true,
     });
     expect(deps.startTyping).toHaveBeenCalledTimes(1);

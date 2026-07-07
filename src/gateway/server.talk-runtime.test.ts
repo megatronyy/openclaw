@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+/**
+ * Tests gateway talk runtime wiring for speech provider execution.
+ */
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   invokeTalkSpeakDirect,
   type TalkSpeakTestPayload,
@@ -87,7 +90,7 @@ async function withAcmeSpeechProvider(
 
 function expectSingleSynthesizeSpeechCall() {
   expect(synthesizeSpeechMock).toHaveBeenCalledTimes(1);
-  const params = synthesizeSpeechMock.mock.calls[0]?.[0];
+  const params = synthesizeSpeechMock.mock.calls.at(0)?.[0];
   if (params === undefined) {
     throw new Error("expected synthesizeSpeech call params");
   }
@@ -95,6 +98,11 @@ function expectSingleSynthesizeSpeechCall() {
 }
 
 describe("gateway talk runtime", () => {
+  beforeAll(async () => {
+    await import("./server-methods/talk.js");
+    await import("../config/config.js");
+  });
+
   beforeEach(() => {
     synthesizeSpeechMock.mockReset();
     synthesizeSpeechMock.mockResolvedValue({

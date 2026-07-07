@@ -1,7 +1,7 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
+// Synology Chat tests cover channel.integration plugin behavior.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  buildChannelTurnContextMock,
+  buildChannelInboundEventContextMock,
   dispatchReplyWithBufferedBlockDispatcher,
   finalizeInboundContextMock,
   registerPluginHttpRouteMock,
@@ -9,12 +9,6 @@ import {
   setSynologyRuntimeConfigForTest,
 } from "./channel.test-mocks.js";
 import { makeFormBody, makeReq, makeRes } from "./test-http-utils.js";
-
-type _RegisteredRoute = {
-  path: string;
-  accountId: string;
-  handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
-};
 
 let createSynologyChatPlugin: typeof import("./channel.js").createSynologyChatPlugin;
 
@@ -35,6 +29,18 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function requireMockCall<TArgs extends unknown[]>(
+  mock: { mock: { calls: TArgs[] } },
+  index: number,
+  label: string,
+): TArgs {
+  const call = mock.mock.calls[index];
+  if (!call) {
+    throw new Error(`expected ${label}`);
+  }
+  return call;
+}
+
 describe("Synology channel wiring integration", () => {
   beforeAll(async () => {
     ({ createSynologyChatPlugin } = await import("./channel.js"));
@@ -43,7 +49,7 @@ describe("Synology channel wiring integration", () => {
   beforeEach(() => {
     registerPluginHttpRouteMock.mockClear();
     dispatchReplyWithBufferedBlockDispatcher.mockClear();
-    buildChannelTurnContextMock.mockClear();
+    buildChannelInboundEventContextMock.mockClear();
     finalizeInboundContextMock.mockClear();
     resolveAgentRouteMock.mockClear();
     setSynologyRuntimeConfigForTest({});
@@ -95,8 +101,8 @@ describe("Synology channel wiring integration", () => {
     const res = makeRes();
     await registered.handler(req, res);
 
-    expect(res._status).toBe(403);
-    expect(res._body).toContain("not authorized");
+    expect(res.status).toBe(403);
+    expect(res.body).toContain("not authorized");
     expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
     abortController.abort();
     await started;
@@ -143,11 +149,8 @@ describe("Synology channel wiring integration", () => {
     );
 
     expect(registerPluginHttpRouteMock).toHaveBeenCalledTimes(2);
-    const alphaRoute = registerPluginHttpRouteMock.mock.calls[0]?.[0];
-    const betaRoute = registerPluginHttpRouteMock.mock.calls[1]?.[0];
-    if (!alphaRoute || !betaRoute) {
-      throw new Error("Expected both Synology Chat routes to register");
-    }
+    const [alphaRoute] = requireMockCall(registerPluginHttpRouteMock, 0, "alpha Synology route");
+    const [betaRoute] = requireMockCall(registerPluginHttpRouteMock, 1, "beta Synology route");
 
     const alphaReq = makeReq(
       "POST",
@@ -173,13 +176,13 @@ describe("Synology channel wiring integration", () => {
     const betaRes = makeRes();
     await betaRoute.handler(betaReq, betaRes);
 
-    expect(alphaRes._status).toBe(204);
-    expect(betaRes._status).toBe(204);
+    expect(alphaRes.status).toBe(204);
+    expect(betaRes.status).toBe(204);
     expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
     expect(finalizeInboundContextMock).toHaveBeenCalledTimes(2);
 
-    const alphaCtx = finalizeInboundContextMock.mock.calls[0]?.[0];
-    const betaCtx = finalizeInboundContextMock.mock.calls[1]?.[0];
+    const [alphaCtx] = requireMockCall(finalizeInboundContextMock, 0, "alpha inbound context");
+    const [betaCtx] = requireMockCall(finalizeInboundContextMock, 1, "beta inbound context");
     const alphaContext = requireRecord(alphaCtx, "alpha inbound context");
     expect(alphaContext.AccountId).toBe("alpha");
     expect(alphaContext.SessionKey).toBe("agent:agent-alpha:synology-chat:alpha:direct:123");

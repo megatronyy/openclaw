@@ -1,3 +1,4 @@
+// Covers wired plugin hooks around LLM request handling.
 import { describe, expect, it, vi } from "vitest";
 import { createHookRunnerWithRegistry } from "./hooks.test-helpers.js";
 
@@ -98,6 +99,7 @@ describe("llm hook runner methods", () => {
         prompt: "hello",
         historyMessages: [],
         imagesCount: 0,
+        tools: [],
       },
     },
     {

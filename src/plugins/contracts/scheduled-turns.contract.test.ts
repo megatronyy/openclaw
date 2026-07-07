@@ -1,3 +1,5 @@
+// Scheduled turn contract tests cover plugin scheduled turn metadata and timestamp bounds.
+import { MAX_DATE_TIMESTAMP_MS } from "@openclaw/normalization-core/number-coercion";
 import {
   createPluginRegistryFixture,
   registerTestPlugin,
@@ -90,6 +92,8 @@ function createMockCronService(): CronServiceContract {
     status: vi.fn(async () => ({
       enabled: true,
       storePath: "/tmp/openclaw-test-cron.json",
+      storage: "sqlite" as const,
+      sqlitePath: "/tmp/openclaw-test-state/state/openclaw.sqlite",
       jobs: 0,
       nextWakeAtMs: null,
     })),
@@ -97,10 +101,16 @@ function createMockCronService(): CronServiceContract {
     listPage: workflowMocks.cronListPage,
     add: workflowMocks.cronAdd,
     update: vi.fn(async (id, patch) => makeCronJob({ id, ...patch })),
+    updateWithPrecondition: vi.fn(async (id, patch, precondition) => {
+      const job = makeCronJob({ id });
+      await precondition(job, Date.now());
+      return makeCronJob({ ...job, ...patch });
+    }),
     remove: workflowMocks.cronRemove,
     run: vi.fn(async () => ({ ok: true, ran: false, reason: "not-due" })),
     enqueueRun: vi.fn(async () => ({ ok: true, ran: false, reason: "not-due" })),
     getJob: vi.fn(() => undefined),
+    readJob: vi.fn(async () => undefined),
     getDefaultAgentId: vi.fn(() => undefined),
     wake: vi.fn(() => ({ ok: true })),
   } as CronServiceContract;
@@ -130,8 +140,10 @@ function mockCronAdd(response: CronJob) {
 
 function getCronAddBody() {
   const addCall = workflowMocks.cronAdd.mock.calls[0];
-  expect(addCall).toBeDefined();
-  return addCall?.[0] as CronJobCreate;
+  if (!addCall) {
+    throw new Error("Expected cron add call");
+  }
+  return addCall[0] as CronJobCreate;
 }
 
 function expectSessionTurnHandle(
@@ -261,7 +273,8 @@ describe("plugin scheduled turns", () => {
   });
 
   it("builds payloads accepted by the real cron.add protocol validator", async () => {
-    const { validateCronAddParams } = await import("../../gateway/protocol/index.js");
+    const { validateCronAddParams } =
+      await import("../../../packages/gateway-protocol/src/index.js");
     workflowMocks.cronAdd.mockImplementation(async (body: unknown) => {
       expect(validateCronAddParams(body)).toBe(true);
       expect((body as { delivery?: unknown }).delivery).toEqual({
@@ -451,6 +464,14 @@ describe("plugin scheduled turns", () => {
         },
       }),
     ).resolves.toBeUndefined();
+    expect(workflowMocks.cronAdd).not.toHaveBeenCalled();
+  });
+
+  it("rejects delayed schedules that cannot fit in the Date timestamp range", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(MAX_DATE_TIMESTAMP_MS));
+
+    await expect(scheduleWorkflowTurn({ schedule: { delayMs: 1 } })).resolves.toBeUndefined();
     expect(workflowMocks.cronAdd).not.toHaveBeenCalled();
   });
 

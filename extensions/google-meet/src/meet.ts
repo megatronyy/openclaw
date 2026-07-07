@@ -1,4 +1,7 @@
+import { readProviderJsonResponse } from "openclaw/plugin-sdk/provider-http";
+// Google Meet plugin module implements meet behavior.
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
+import { uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { exportGoogleDriveDocumentText, extractGoogleDriveDocumentId } from "./drive.js";
 import { googleApiError } from "./google-api-errors.js";
 
@@ -281,15 +284,13 @@ async function fetchGoogleMeetJson<T>(params: {
   });
   try {
     if (!response.ok) {
-      const detail = await response.text();
       throw await googleApiError({
         response,
-        detail,
         prefix: params.errorPrefix,
         scopes: [GOOGLE_MEET_MEDIA_SCOPE],
       });
     }
-    return (await response.json()) as T;
+    return await readProviderJsonResponse<T>(response, params.errorPrefix);
   } finally {
     await release();
   }
@@ -348,15 +349,16 @@ export async function fetchGoogleMeetSpace(params: {
   });
   try {
     if (!response.ok) {
-      const detail = await response.text();
       throw await googleApiError({
         response,
-        detail,
         prefix: "Google Meet spaces.get",
         scopes: [GOOGLE_MEET_SPACE_SCOPE],
       });
     }
-    const payload = (await response.json()) as GoogleMeetSpace;
+    const payload = await readProviderJsonResponse<GoogleMeetSpace>(
+      response,
+      "Google Meet spaces.get",
+    );
     if (!payload.name?.trim()) {
       throw new Error("Google Meet spaces.get response was missing name");
     }
@@ -390,10 +392,8 @@ export async function createGoogleMeetSpace(params: {
   });
   try {
     if (!response.ok) {
-      const detail = await response.text();
       throw await googleApiError({
         response,
-        detail,
         prefix: "Google Meet spaces.create",
         scopes:
           params.config && Object.keys(params.config).length > 0
@@ -401,7 +401,10 @@ export async function createGoogleMeetSpace(params: {
             : [GOOGLE_MEET_SPACE_CREATED_SCOPE],
       });
     }
-    const payload = (await response.json()) as GoogleMeetSpace;
+    const payload = await readProviderJsonResponse<GoogleMeetSpace>(
+      response,
+      "Google Meet spaces.create",
+    );
     if (!payload.name?.trim()) {
       throw new Error("Google Meet spaces.create response was missing name");
     }
@@ -440,10 +443,8 @@ export async function endGoogleMeetActiveConference(params: {
   });
   try {
     if (!response.ok) {
-      const detail = await response.text();
       throw await googleApiError({
         response,
-        detail,
         prefix: "Google Meet spaces.endActiveConference",
         scopes: [GOOGLE_MEET_SPACE_CREATED_SCOPE],
       });
@@ -797,9 +798,10 @@ function mergeAttendanceRows(
       grouped.set(key, { ...row, participants: [row.participant] });
       continue;
     }
-    existing.participants = [
-      ...new Set([...(existing.participants ?? [existing.participant]), row.participant]),
-    ];
+    existing.participants = uniqueStrings([
+      ...(existing.participants ?? [existing.participant]),
+      row.participant,
+    ]);
     existing.sessions.push(...row.sessions);
     existing.displayName ??= row.displayName;
     existing.user ??= row.user;

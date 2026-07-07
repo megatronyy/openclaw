@@ -1,3 +1,4 @@
+// Status JSON runtime tests cover runtime status payload construction and command dependencies.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveStatusJsonOutput } from "./status-json-runtime.ts";
 
@@ -48,6 +49,15 @@ function createScan() {
   } satisfies Parameters<typeof resolveStatusJsonOutput>[0]["scan"];
 }
 
+function requireStatusPayloadInput() {
+  const call = mocks.buildStatusJsonPayload.mock.calls[0];
+  if (!call) {
+    throw new Error("expected status json payload call");
+  }
+  const [payloadInput] = call;
+  return payloadInput;
+}
+
 describe("status-json-runtime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -80,7 +90,7 @@ describe("status-json-runtime", () => {
       suppressHealthErrors: undefined,
     });
     expect(mocks.buildStatusJsonPayload).toHaveBeenCalledOnce();
-    const payloadInput = mocks.buildStatusJsonPayload.mock.calls[0]?.[0];
+    const payloadInput = requireStatusPayloadInput();
     expect(payloadInput.surface.gatewayConnection).toStrictEqual({
       url: "ws://127.0.0.1:18789",
       urlSource: "config",
@@ -102,7 +112,7 @@ describe("status-json-runtime", () => {
     ]);
     expect(result).toEqual({
       built: true,
-      input: mocks.buildStatusJsonPayload.mock.calls[0][0],
+      input: payloadInput,
     });
   });
 
@@ -134,7 +144,7 @@ describe("status-json-runtime", () => {
       suppressHealthErrors: undefined,
     });
     expect(mocks.buildStatusJsonPayload).toHaveBeenCalledOnce();
-    const payloadInput = mocks.buildStatusJsonPayload.mock.calls[0]?.[0];
+    const payloadInput = requireStatusPayloadInput();
     expect(payloadInput.surface.gatewayProbeAuth).toStrictEqual({ token: "tok" });
     expect(payloadInput.securityAudit).toBeUndefined();
     expect(payloadInput.usage).toBeUndefined();
@@ -161,7 +171,7 @@ describe("status-json-runtime", () => {
     });
 
     expect(mocks.buildStatusJsonPayload).toHaveBeenCalledOnce();
-    const payloadInput = mocks.buildStatusJsonPayload.mock.calls[0]?.[0];
+    const payloadInput = requireStatusPayloadInput();
     expect(payloadInput.surface.gatewayProbeAuth).toStrictEqual({ token: "tok" });
     expect(payloadInput.health).toBeUndefined();
     expect(mocks.resolveStatusRuntimeSnapshot).toHaveBeenCalledWith({

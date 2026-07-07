@@ -1,3 +1,4 @@
+// Browser tests cover browser request.profile from body plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { loadConfigMock, isNodeCommandAllowedMock, resolveNodeCommandAllowlistMock } = vi.hoisted(
@@ -76,7 +77,7 @@ function invokeParams(nodeRegistry: ReturnType<typeof createContext>) {
 }
 
 function firstRespondCall(respond: ReturnType<typeof vi.fn>): RespondCall {
-  const call = respond.mock.calls[0] as RespondCall | undefined;
+  const [call] = respond.mock.calls as RespondCall[];
   if (!call) {
     throw new Error("expected respond call");
   }

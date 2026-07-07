@@ -1,9 +1,10 @@
+// Msteams tests cover attachments.graph plugin behavior.
 import { mockPinnedHostnameResolution } from "openclaw/plugin-sdk/test-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginRuntime } from "../runtime-api.js";
 import { readRemoteMediaResponse } from "./attachments.test-helpers.js";
 import { downloadMSTeamsGraphMedia } from "./attachments/graph.js";
-import { resolveRequestUrl } from "./attachments/shared.js";
+import { encodeGraphShareId, resolveRequestUrl } from "./attachments/shared.js";
 import { setMSTeamsRuntime } from "./runtime.js";
 
 const GRAPH_HOST = "graph.microsoft.com";
@@ -18,13 +19,21 @@ const CONTENT_TYPE_APPLICATION_PDF = "application/pdf";
 const PNG_BUFFER = Buffer.from("png");
 
 const detectMimeMock = vi.fn(async () => CONTENT_TYPE_IMAGE_PNG);
-const saveMediaBufferMock = vi.fn(async () => ({
-  id: "saved.png",
-  path: "/tmp/saved.png",
-  size: Buffer.byteLength(PNG_BUFFER),
-  contentType: CONTENT_TYPE_IMAGE_PNG,
-}));
-const fetchRemoteMediaMock = vi.fn(
+const saveMediaBufferMock = vi.fn(
+  async (
+    _buffer: Buffer,
+    contentType?: string,
+    _subdir?: string,
+    _maxBytes?: number,
+    _originalFilename?: string,
+  ) => ({
+    id: "saved.png",
+    path: "/tmp/saved.png",
+    size: Buffer.byteLength(PNG_BUFFER),
+    contentType: contentType ?? CONTENT_TYPE_IMAGE_PNG,
+  }),
+);
+const readRemoteMediaBufferMock = vi.fn(
   async (params: {
     url: string;
     maxBytes?: number;
@@ -36,6 +45,46 @@ const fetchRemoteMediaMock = vi.fn(
     return readRemoteMediaResponse(res, params);
   },
 );
+const saveRemoteMediaMock = vi.fn(
+  async (params: {
+    url: string;
+    maxBytes?: number;
+    filePathHint?: string;
+    fetchImpl?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  }) => {
+    const fetched = await readRemoteMediaBufferMock(params);
+    return await saveMediaBufferMock(
+      fetched.buffer,
+      fetched.contentType,
+      "inbound",
+      params.maxBytes,
+      params.filePathHint,
+    );
+  },
+);
+const saveResponseMediaMock = vi.fn(
+  async (
+    res: Response,
+    options: {
+      maxBytes?: number;
+      fallbackContentType?: string;
+      subdir?: string;
+      originalFilename?: string;
+    },
+  ) => {
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (options.maxBytes !== undefined && buffer.byteLength > options.maxBytes) {
+      throw new Error(`payload exceeds maxBytes ${options.maxBytes}`);
+    }
+    return await saveMediaBufferMock(
+      buffer,
+      options.fallbackContentType,
+      options.subdir ?? "inbound",
+      options.maxBytes,
+      options.originalFilename,
+    );
+  },
+);
 
 const runtimeStub = {
   media: {
@@ -43,7 +92,9 @@ const runtimeStub = {
   },
   channel: {
     media: {
-      fetchRemoteMedia: fetchRemoteMediaMock,
+      readRemoteMediaBuffer: readRemoteMediaBufferMock,
+      saveRemoteMedia: saveRemoteMediaMock,
+      saveResponseMedia: saveResponseMediaMock,
       saveMediaBuffer: saveMediaBufferMock,
     },
   },
@@ -111,7 +162,7 @@ const expectMediaBufferSaved = () => {
 };
 
 const createHostedContentsWithType = (contentType: string, ...ids: string[]) =>
-  ids.map((id) => ({ id, contentType, contentBytes: PNG_BUFFER.toString("base64") }));
+  ids.map((id) => ({ id, contentType }));
 const createHostedImageContents = (...ids: string[]) =>
   createHostedContentsWithType(CONTENT_TYPE_IMAGE_PNG, ...ids);
 const createReferenceAttachment = (shareUrl = DEFAULT_SHARE_REFERENCE_URL) => ({
@@ -215,10 +266,28 @@ const runGraphMediaSuccessCase = async ({
 
 const GRAPH_MEDIA_SUCCESS_CASES: GraphMediaSuccessCase[] = [
   withLabel("downloads hostedContents images", {
-    buildOptions: () => ({ hostedContents: createHostedImageContents("1") }),
+    buildOptions: () => ({
+      hostedContents: createHostedImageContents("1"),
+      onUnhandled: (url) =>
+        url.endsWith("/hostedContents/1/$value")
+          ? createBufferResponse(PNG_BUFFER, CONTENT_TYPE_IMAGE_PNG)
+          : undefined,
+    }),
     expectedLength: 1,
     assert: ({ fetchMock }) => {
       expect(fetchMock).toHaveBeenCalled();
+      expectMediaBufferSaved();
+    },
+  }),
+  withLabel("streams hostedContent value responses through shared response saver", {
+    buildOptions: () => ({
+      hostedContents: [{ id: "hosted-1", contentType: CONTENT_TYPE_APPLICATION_PDF }],
+      onUnhandled: (url) =>
+        url.endsWith("/hostedContents/hosted-1/$value") ? createPdfResponse() : undefined,
+    }),
+    expectedLength: 1,
+    assert: () => {
+      expect(saveResponseMediaMock).toHaveBeenCalledTimes(1);
       expectMediaBufferSaved();
     },
   }),
@@ -228,6 +297,10 @@ const GRAPH_MEDIA_SUCCESS_CASES: GraphMediaSuccessCase[] = [
         hostedContents: createHostedImageContents("hosted-1"),
         ...buildDefaultShareReferenceGraphFetchOptions({
           onShareRequest: () => createPdfResponse(),
+          onUnhandled: (url) =>
+            url.endsWith("/hostedContents/hosted-1/$value")
+              ? createBufferResponse(PNG_BUFFER, CONTENT_TYPE_IMAGE_PNG)
+              : undefined,
         }),
       };
     },
@@ -242,7 +315,9 @@ describe("msteams graph attachments", () => {
     ssrfMock?.mockRestore();
     ssrfMock = mockPinnedHostnameResolution();
     detectMimeMock.mockClear();
-    fetchRemoteMediaMock.mockClear();
+    readRemoteMediaBufferMock.mockClear();
+    saveRemoteMediaMock.mockClear();
+    saveResponseMediaMock.mockClear();
     saveMediaBufferMock.mockClear();
     setMSTeamsRuntime(runtimeStub);
   });
@@ -316,37 +391,29 @@ describe("msteams graph attachments", () => {
 
     expectAttachmentMediaLength(media.media, 0);
     const calledUrls = fetchMock.mock.calls.map((call) => call[0]);
+    const expectedSharesUrl = `${GRAPH_SHARES_URL_PREFIX}${encodeGraphShareId(DEFAULT_SHARE_REFERENCE_URL)}/driveItem/content`;
     expect(calledUrls).toEqual([
       DEFAULT_MESSAGE_URL,
-      expect.stringContaining(GRAPH_SHARES_URL_PREFIX),
+      expectedSharesUrl,
       `${DEFAULT_MESSAGE_URL}/hostedContents`,
-      expect.stringContaining(GRAPH_SHARES_URL_PREFIX),
+      expectedSharesUrl,
     ]);
     expect(calledUrls).not.toContain(escapedUrl);
   });
 
-  it("skips inline hosted content when estimated decoded bytes exceed maxBytes", async () => {
-    const oversizedBase64 = "A".repeat(16);
-    const bufferFromSpy = vi.spyOn(Buffer, "from");
+  it("enforces maxBytes while streaming hosted content", async () => {
+    const { media } = await downloadGraphMediaWithMockOptions(
+      {
+        hostedContents: createHostedImageContents("hosted-oversized"),
+        onUnhandled: (url) =>
+          url.endsWith("/hostedContents/hosted-oversized/$value")
+            ? createBufferResponse("too large", CONTENT_TYPE_IMAGE_PNG)
+            : undefined,
+      },
+      { maxBytes: 4 },
+    );
 
-    try {
-      const { media } = await downloadGraphMediaWithMockOptions(
-        {
-          hostedContents: [
-            {
-              id: "hosted-oversized",
-              contentType: CONTENT_TYPE_IMAGE_PNG,
-              contentBytes: oversizedBase64,
-            },
-          ],
-        },
-        { maxBytes: 4 },
-      );
-
-      expect(media.media).toStrictEqual([]);
-      expect(bufferFromSpy).not.toHaveBeenCalledWith(oversizedBase64, "base64");
-    } finally {
-      bufferFromSpy.mockRestore();
-    }
+    expect(media.media).toStrictEqual([]);
+    expect(saveResponseMediaMock).toHaveBeenCalledTimes(1);
   });
 });

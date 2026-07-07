@@ -1,7 +1,9 @@
+// Telegram tests cover network errors plugin behavior.
 import { describe, expect, it } from "vitest";
 import {
   getTelegramNetworkErrorOrigin,
   isRecoverableTelegramNetworkError,
+  isRetryableTelegramApiError,
   isTelegramRateLimitError,
   isSafeToRetrySendError,
   isTelegramClientRejection,
@@ -83,6 +85,7 @@ describe("isRecoverableTelegramNetworkError", () => {
 
   it.each([
     ["ETIMEDOUT", "timeout"],
+    ["ENETDOWN", "network down"],
     ["ECONNABORTED", "aborted"],
     ["ERR_NETWORK", "network"],
   ])("detects recoverable error code %s", (code, message) => {
@@ -135,6 +138,18 @@ describe("isRecoverableTelegramNetworkError", () => {
     const undiciSnippetErr = new Error("Undici: socket failure");
     expect(isRecoverableTelegramNetworkError(undiciSnippetErr, { context: "send" })).toBe(false);
     expect(isRecoverableTelegramNetworkError(undiciSnippetErr, { context: "polling" })).toBe(true);
+  });
+
+  it("treats delete/react/edit/action (idempotent) contexts like polling, not send", () => {
+    const undiciSnippetErr = new Error("Undici: socket failure");
+    // delete, react, edit, and action are idempotent or non-message operations;
+    // a transient snippet-only error must be retried (allowMessageMatch defaults true),
+    // matching polling/webhook. send stays strict as the regression guard.
+    expect(isRecoverableTelegramNetworkError(undiciSnippetErr, { context: "delete" })).toBe(true);
+    expect(isRecoverableTelegramNetworkError(undiciSnippetErr, { context: "react" })).toBe(true);
+    expect(isRecoverableTelegramNetworkError(undiciSnippetErr, { context: "edit" })).toBe(true);
+    expect(isRecoverableTelegramNetworkError(undiciSnippetErr, { context: "action" })).toBe(true);
+    expect(isRecoverableTelegramNetworkError(undiciSnippetErr, { context: "send" })).toBe(false);
   });
 
   it("treats grammY failed-after envelope errors as recoverable in send context", () => {
@@ -218,6 +233,7 @@ describe("isSafeToRetrySendError", () => {
     ["ECONNREFUSED", "connect ECONNREFUSED", true],
     ["ENOTFOUND", "getaddrinfo ENOTFOUND", true],
     ["EAI_AGAIN", "getaddrinfo EAI_AGAIN", true],
+    ["ENETDOWN", "connect ENETDOWN", true],
     ["ENETUNREACH", "connect ENETUNREACH", true],
     ["EHOSTUNREACH", "connect EHOSTUNREACH", true],
     ["ECONNRESET", "read ECONNRESET", false],
@@ -253,6 +269,36 @@ describe("isSafeToRetrySendError", () => {
     );
     expect(isSafeToRetrySendError(wrapped)).toBe(false);
   });
+
+  it.each([
+    ["status", Object.assign(new Error("Misdirected Request"), { status: 421 })],
+    ["statusCode", Object.assign(new Error("Misdirected Request"), { statusCode: "421" })],
+    ["error_code", errorWithTelegramCode("Misdirected Request", 421)],
+    ["message", new Error("421 Misdirected Request")],
+    [
+      "nested cause",
+      Object.assign(new Error("Network request for 'sendMessage' failed!"), {
+        cause: Object.assign(new Error("Misdirected Request"), { status: 421 }),
+      }),
+    ],
+    [
+      "grammY HttpError",
+      new MockHttpError(
+        "Network request for 'sendMessage' failed!",
+        Object.assign(new Error("Misdirected Request"), { status: 421 }),
+      ),
+    ],
+  ])("treats Telegram 421 Misdirected Request as safe to retry via %s", (_name, err) => {
+    expect(isSafeToRetrySendError(err)).toBe(true);
+  });
+
+  it("does not parse malformed status strings as Telegram 421", () => {
+    expect(
+      isSafeToRetrySendError(
+        Object.assign(new Error("Misdirected Request"), { statusCode: "421abc" }),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("isTelegramServerError", () => {
@@ -276,6 +322,19 @@ describe("isTelegramRateLimitError", () => {
       response: { parameters: { retry_after: 1 } },
     };
     expect(isTelegramRateLimitError(wrapped)).toBe(true);
+  });
+});
+
+describe("isRetryableTelegramApiError", () => {
+  it.each([
+    ["Too Many Requests", 429, true],
+    ["Internal Server Error", 500, true],
+    ["Bad Gateway", 502, true],
+    ["Conflict", 409, false],
+    ["Unauthorized", 401, false],
+    ["Not Found", 404, false],
+  ])("returns %s for error_code %s", (message, errorCode, expected) => {
+    expect(isRetryableTelegramApiError(errorWithTelegramCode(message, errorCode))).toBe(expected);
   });
 });
 

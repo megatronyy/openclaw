@@ -1,3 +1,4 @@
+// Discord tests cover thread title.generate plugin behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import * as agentRuntimeModule from "openclaw/plugin-sdk/simple-completion-runtime";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,16 @@ const prepareSimpleCompletionModelForAgentMock =
 const extractAssistantTextMock = vi.fn<typeof agentRuntimeModule.extractAssistantText>();
 
 let generateThreadTitle: typeof import("./thread-title.js").generateThreadTitle;
+
+function firstCompletionArgs(): Parameters<
+  typeof agentRuntimeModule.completeWithPreparedSimpleCompletionModel
+>[0] {
+  const firstCall = completeWithPreparedSimpleCompletionModelMock.mock.calls.at(0);
+  if (!firstCall) {
+    throw new Error("expected completion call");
+  }
+  return firstCall[0];
+}
 
 beforeAll(async () => {
   ({ generateThreadTitle } = await import("./thread-title.js"));
@@ -30,6 +41,7 @@ beforeEach(() => {
     model: {
       provider: "anthropic",
       id: "claude-sonnet-4-6",
+      maxTokens: 64_000,
     },
     auth: {
       apiKey: "sk-test",
@@ -64,6 +76,7 @@ describe("generateThreadTitle", () => {
       model: {
         provider: "openrouter",
         id: "anthropic/claude-sonnet-4-5",
+        maxTokens: 64_000,
       },
       auth: {
         apiKey: "sk-openrouter",
@@ -88,6 +101,7 @@ describe("generateThreadTitle", () => {
     expect(prepareSimpleCompletionModelForAgentMock).toHaveBeenCalledWith({
       cfg,
       agentId: "main",
+      useUtilityModel: true,
       allowMissingApiKeyModes: ["aws-sdk"],
     });
   });
@@ -105,6 +119,7 @@ describe("generateThreadTitle", () => {
       cfg,
       agentId: "main",
       modelRef: "openai/gpt-4.1-mini@local",
+      useUtilityModel: true,
       allowMissingApiKeyModes: ["aws-sdk"],
     });
   });
@@ -147,6 +162,7 @@ describe("generateThreadTitle", () => {
   it("builds contextual prompt and forwards completion options", async () => {
     const now = 1_700_000_000_000;
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     let result: string | null;
     try {
       result = await generateThreadTitle({
@@ -162,10 +178,7 @@ describe("generateThreadTitle", () => {
 
     expect(result).toBe("Generated title");
     expect(completeWithPreparedSimpleCompletionModelMock).toHaveBeenCalledTimes(1);
-    const completionArgs = completeWithPreparedSimpleCompletionModelMock.mock.calls[0]?.[0];
-    if (!completionArgs) {
-      throw new Error("expected completion call");
-    }
+    const completionArgs = firstCompletionArgs();
     expect(completionArgs.context).toEqual({
       systemPrompt:
         "Generate a concise Discord thread title (3-6 words). Return only the title. Use channel context when provided and avoid redundant channel-name words unless needed for clarity.",
@@ -179,11 +192,40 @@ describe("generateThreadTitle", () => {
       ],
     });
     expect(completionArgs.options).toEqual({
-      maxTokens: 512,
+      maxTokens: 4_096,
       signal: completionArgs.options?.signal,
     });
     expect(completionArgs.options?.signal).toBeInstanceOf(AbortSignal);
     expect(completionArgs.options).not.toHaveProperty("temperature");
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
+  });
+
+  it("clamps completion budget to the selected model output cap", async () => {
+    prepareSimpleCompletionModelForAgentMock.mockResolvedValueOnce({
+      selection: {
+        provider: "anthropic",
+        modelId: "claude-haiku-4-5",
+        agentDir: "/tmp/openclaw-agent",
+      },
+      model: {
+        provider: "anthropic",
+        id: "claude-haiku-4-5",
+        maxTokens: 1_024,
+      },
+      auth: {
+        apiKey: "sk-test",
+        source: "env:TEST_API_KEY",
+        mode: "api-key",
+      },
+    } as Awaited<ReturnType<typeof agentRuntimeModule.prepareSimpleCompletionModelForAgent>>);
+
+    await generateThreadTitle({
+      cfg: EMPTY_DISCORD_TEST_CONFIG,
+      agentId: "main",
+      messageText: "Need a generated title.",
+    });
+
+    expect(firstCompletionArgs().options?.maxTokens).toBe(1_024);
   });
 
   it("returns null when completion throws", async () => {

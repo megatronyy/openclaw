@@ -1,4 +1,5 @@
-import { verifyEvent, getPublicKey } from "nostr-tools";
+// Nostr tests cover nostr profile plugin behavior.
+import { verifyEvent, getPublicKey, type SimplePool } from "nostr-tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NostrProfile } from "./config-schema.js";
 import {
@@ -7,6 +8,7 @@ import {
   contentToProfile,
   validateProfile,
   sanitizeProfileForDisplay,
+  publishProfile,
   type ProfileContent,
 } from "./nostr-profile.js";
 import { TEST_HEX_PRIVATE_KEY_BYTES } from "./test-fixtures.js";
@@ -203,14 +205,10 @@ describe("validateProfile", () => {
 
     const result = validateProfile(profile);
 
-    expect(result).toMatchObject({
-      valid: true,
-      profile: {
-        name: "validuser",
-        about: "A valid user",
-        picture: "https://example.com/pic.png",
-      },
-    });
+    expect(result.valid).toBe(true);
+    expect(result.profile?.name).toBe("validuser");
+    expect(result.profile?.about).toBe("A valid user");
+    expect(result.profile?.picture).toBe("https://example.com/pic.png");
     expect(result).not.toHaveProperty("errors");
   });
 
@@ -415,5 +413,76 @@ describe("edge cases", () => {
 
     const event = createTestProfileEvent(profile);
     expect(verifyEvent(event)).toBe(true);
+  });
+});
+
+// ============================================================================
+// Profile Publishing Tests
+// ============================================================================
+
+describe("publishProfile", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function createFakePool(publishResult: unknown): SimplePool {
+    return {
+      publish: vi.fn(() => [publishResult]),
+    } as unknown as SimplePool;
+  }
+
+  it("clears the per-relay timeout timer after a successful publish", async () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const profile: NostrProfile = { name: "test" };
+    const pool = createFakePool(Promise.resolve());
+
+    const result = await publishProfile(
+      pool,
+      TEST_HEX_PRIVATE_KEY_BYTES,
+      ["wss://relay.example"],
+      profile,
+    );
+
+    expect(result.successes).toEqual(["wss://relay.example"]);
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the per-relay timeout timer after a publish timeout", async () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const profile: NostrProfile = { name: "test" };
+    const pool = createFakePool(new Promise(() => {}));
+
+    const promise = publishProfile(
+      pool,
+      TEST_HEX_PRIVATE_KEY_BYTES,
+      ["wss://relay.example"],
+      profile,
+    );
+    vi.advanceTimersByTime(6_000);
+    const result = await promise;
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]?.error).toContain("timeout");
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not add dangling timers when publishing to multiple relays", async () => {
+    vi.spyOn(globalThis, "setTimeout").mockClear();
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const profile: NostrProfile = { name: "test" };
+    const pool = createFakePool(Promise.resolve());
+
+    await publishProfile(
+      pool,
+      TEST_HEX_PRIVATE_KEY_BYTES,
+      ["wss://relay.a", "wss://relay.b"],
+      profile,
+    );
+
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(2);
   });
 });

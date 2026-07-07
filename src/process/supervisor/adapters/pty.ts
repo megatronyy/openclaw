@@ -1,4 +1,6 @@
-import { killProcessTree } from "../../kill-tree.js";
+import { createLazyRuntimeModule } from "../../../shared/lazy-runtime.js";
+// PTY adapter wraps pseudo-terminal processes for the process supervisor.
+import { signalProcessTree } from "../../kill-tree.js";
 import { prepareOomScoreAdjustedSpawn } from "../../linux-oom-score.js";
 import type { ManagedRunStdin, SpawnProcessAdapter } from "../types.js";
 import { toStringEnv } from "./env.js";
@@ -35,12 +37,9 @@ type PtyModule = {
 
 export type PtyAdapter = SpawnProcessAdapter;
 
-let ptyModulePromise: Promise<PtyModule> | null = null;
-
-async function loadPtyModule(): Promise<PtyModule> {
-  ptyModulePromise ??= import("@lydell/node-pty") as Promise<unknown> as Promise<PtyModule>;
-  return ptyModulePromise;
-}
+const loadPtyModule = createLazyRuntimeModule(
+  () => import("@lydell/node-pty") as Promise<unknown> as Promise<PtyModule>,
+);
 
 export async function createPtyAdapter(params: {
   shell: string;
@@ -185,8 +184,12 @@ export async function createPtyAdapter(params: {
 
   const kill = (signal: NodeJS.Signals = "SIGKILL") => {
     try {
-      if (signal === "SIGKILL" && typeof pty.pid === "number" && pty.pid > 0) {
-        killProcessTree(pty.pid);
+      if (
+        (signal === "SIGKILL" || signal === "SIGTERM") &&
+        typeof pty.pid === "number" &&
+        pty.pid > 0
+      ) {
+        signalProcessTree(pty.pid, signal);
       } else if (process.platform === "win32") {
         pty.kill();
       } else {

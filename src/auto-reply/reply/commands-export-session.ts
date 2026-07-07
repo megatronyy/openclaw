@@ -1,12 +1,20 @@
+// Builds export bundles for a session transcript and runtime context.
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAcpSessionMetaForEntry } from "../../acp/runtime/session-meta.js";
+import {
+  parseSessionFileEntriesWithWarnings,
+  type SessionFileParseWarning,
+} from "../../agents/sessions/session-file-parser.js";
 import {
   migrateSessionEntries,
-  parseSessionEntries,
-  type SessionEntry as PiSessionEntry,
+  type SessionEntry as AgentSessionEntry,
   type SessionHeader,
-} from "@earendil-works/pi-coding-agent";
+  type SessionMessageEntry,
+} from "../../agents/sessions/session-manager.js";
+import { scanSessionTranscriptTree } from "../../config/sessions/transcript-tree.js";
+import type { SessionEntry as StoredSessionEntry } from "../../config/sessions/types.js";
 import { pathExists } from "../../infra/fs-safe.js";
 import type { ReplyPayload } from "../types.js";
 import {
@@ -22,11 +30,71 @@ const EXPORT_HTML_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 
 
 interface SessionData {
   header: SessionHeader | null;
-  entries: PiSessionEntry[];
+  entries: AgentSessionEntry[];
   leafId: string | null;
+  hasLeafControl: boolean;
   systemPrompt?: string;
   tools?: Array<{ name: string; description?: string; parameters?: unknown }>;
+  warning?: string;
 }
+
+const BACKEND_DELEGATED_WARNING =
+  "This session was handled by a backend runtime (e.g. CLI/ACP). Assistant replies, tool calls, and usage data are stored in the backend transcript and are not included in this export.";
+
+function hasNonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasBackendSession(entry: StoredSessionEntry, hasStoredAcpSession: boolean): boolean {
+  return (
+    hasStoredAcpSession ||
+    hasNonEmptyString(entry.claudeCliSessionId) ||
+    Object.values(entry.cliSessionBindings ?? {}).some((binding) =>
+      hasNonEmptyString(binding?.sessionId),
+    ) ||
+    Object.values(entry.cliSessionIds ?? {}).some(hasNonEmptyString)
+  );
+}
+
+function hasPersistedAcpSession(params: {
+  sessionKey: string;
+  entry: StoredSessionEntry;
+}): boolean {
+  if (params.entry.acp) {
+    return true;
+  }
+  try {
+    return Boolean(readAcpSessionMetaForEntry(params));
+  } catch {
+    return false;
+  }
+}
+
+function isBackendDelegatedSession(
+  entry: StoredSessionEntry,
+  entries: AgentSessionEntry[],
+  hasStoredAcpSession: boolean,
+): boolean {
+  if (!hasBackendSession(entry, hasStoredAcpSession)) {
+    return false;
+  }
+  if (entries.length === 0) {
+    return false;
+  }
+  const messages = entries.filter(
+    (transcriptEntry): transcriptEntry is SessionMessageEntry => transcriptEntry.type === "message",
+  );
+  return (
+    messages.length > 0 &&
+    messages.every((transcriptEntry) => transcriptEntry.message.role === "user")
+  );
+}
+
+type SessionExportWarningSummary = {
+  code: SessionFileParseWarning["code"];
+  count: number;
+  rows: number[];
+};
 
 async function loadTemplate(fileName: string): Promise<string> {
   return await fsp.readFile(path.join(EXPORT_HTML_DIR, fileName), "utf-8");
@@ -60,7 +128,7 @@ async function generateHtml(sessionData: SessionData): Promise<string> {
     loadTemplate(path.join("vendor", "highlight.min.js")),
   ]);
 
-  // Use pi-mono dark theme colors (matching their theme/dark.json)
+  // Use the bundled dark session-export palette
   const themeVars = `
     --cyan: #00d7ff;
     --blue: #5f87ff;
@@ -144,20 +212,80 @@ async function writeNewDefaultExportFile(filePath: string, html: string): Promis
   }
   throw new Error(`Could not find an unused export filename near ${filePath}`);
 }
+
+function summarizeSessionExportWarnings(
+  warnings: SessionFileParseWarning[],
+): SessionExportWarningSummary[] {
+  const summaries = new Map<SessionFileParseWarning["code"], SessionExportWarningSummary>();
+  for (const warning of warnings) {
+    const summary = summaries.get(warning.code);
+    if (summary) {
+      summary.count += 1;
+      if (summary.rows.length < 20) {
+        summary.rows.push(warning.row);
+      }
+      continue;
+    }
+    summaries.set(warning.code, {
+      code: warning.code,
+      count: 1,
+      rows: [warning.row],
+    });
+  }
+  return [...summaries.values()];
+}
+
+function formatSkippedRows(count: number): string {
+  return `${count.toLocaleString()} malformed transcript ${count === 1 ? "row" : "rows"}`;
+}
+
+function formatSessionExportWarning(summary: SessionExportWarningSummary): string {
+  const rows = summary.rows.length > 0 ? ` rows ${summary.rows.join(", ")}` : "";
+  const verb = summary.count === 1 ? "was" : "were";
+  switch (summary.code) {
+    case "invalid-session-json":
+      return `⚠️ Skipped ${formatSkippedRows(summary.count)} that ${verb} not valid JSON.${rows}`;
+    case "invalid-session-row":
+      return summary.count === 1
+        ? `⚠️ Skipped ${formatSkippedRows(summary.count)} that was not a session entry.${rows}`
+        : `⚠️ Skipped ${formatSkippedRows(summary.count)} that were not session entries.${rows}`;
+  }
+  const unreachable: never = summary.code;
+  return unreachable;
+}
+
 async function readSessionDataFromTranscript(sessionFile: string): Promise<{
   header: SessionHeader | null;
-  entries: PiSessionEntry[];
+  entries: AgentSessionEntry[];
   leafId: string | null;
+  hasLeafControl: boolean;
+  warnings: SessionExportWarningSummary[];
 }> {
   const raw = await fsp.readFile(sessionFile, "utf-8");
-  const fileEntries = parseSessionEntries(raw);
+  const { entries: fileEntries, warnings } = parseSessionFileEntriesWithWarnings(raw);
   migrateSessionEntries(fileEntries);
   const header =
     fileEntries.find((entry): entry is SessionHeader => entry.type === "session") ?? null;
-  const entries = fileEntries.filter((entry): entry is PiSessionEntry => entry.type !== "session");
-  const lastEntry = entries.at(-1);
-  const leafId = typeof lastEntry?.id === "string" ? lastEntry.id : null;
-  return { header, entries, leafId };
+  const rawEntries = fileEntries.filter(
+    (entry): entry is AgentSessionEntry => entry.type !== "session",
+  );
+  const tree = scanSessionTranscriptTree(rawEntries);
+  const hasLeafControl = tree.hasLeafControl;
+  const entries = hasLeafControl
+    ? rawEntries.map((entry) => {
+        const node = tree.byId.get(entry.id);
+        return node && entry.parentId !== node.parentId
+          ? ({ ...entry, parentId: node.parentId } as AgentSessionEntry)
+          : entry;
+      })
+    : rawEntries;
+  return {
+    header,
+    entries,
+    leafId: tree.leafId,
+    hasLeafControl,
+    warnings: summarizeSessionExportWarnings(warnings),
+  };
 }
 
 export async function buildExportSessionReply(params: HandleCommandsParams): Promise<ReplyPayload> {
@@ -179,7 +307,8 @@ export async function buildExportSessionReply(params: HandleCommandsParams): Pro
   }
 
   // 2. Load session entries
-  const { entries, header, leafId } = await readSessionDataFromTranscript(sessionFile);
+  const { entries, header, leafId, hasLeafControl, warnings } =
+    await readSessionDataFromTranscript(sessionFile);
 
   // 3. Build full system prompt
   const { systemPrompt, tools } = await resolveCommandsSystemPromptBundle({
@@ -188,16 +317,25 @@ export async function buildExportSessionReply(params: HandleCommandsParams): Pro
   });
 
   // 4. Prepare session data
+  const hasStoredAcpSession = hasPersistedAcpSession({
+    sessionKey: params.sessionKey,
+    entry,
+  });
+  const backendWarning = isBackendDelegatedSession(entry, entries, hasStoredAcpSession)
+    ? BACKEND_DELEGATED_WARNING
+    : undefined;
   const sessionData: SessionData = {
     header,
     entries,
     leafId,
+    hasLeafControl,
     systemPrompt,
     tools: tools.map((t) => ({
       name: t.name,
       description: t.description,
       parameters: t.parameters,
     })),
+    warning: backendWarning,
   };
 
   // 5. Generate HTML
@@ -234,6 +372,8 @@ export async function buildExportSessionReply(params: HandleCommandsParams): Pro
       "",
       `📄 File: ${displayPath}`,
       `📊 Entries: ${entries.length}`,
+      ...warnings.map(formatSessionExportWarning),
+      ...(backendWarning ? [`⚠️ ${backendWarning}`] : []),
       `🧠 System prompt: ${systemPrompt.length.toLocaleString()} chars`,
       `🔧 Tools: ${tools.length}`,
     ].join("\n"),

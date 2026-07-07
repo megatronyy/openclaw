@@ -1,3 +1,4 @@
+// Msteams tests cover inbound media plugin behavior.
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../attachments.js", () => ({
@@ -23,7 +24,7 @@ import {
   downloadMSTeamsGraphMedia,
   extractMSTeamsHtmlAttachmentIds,
 } from "../attachments.js";
-import { resolveMSTeamsInboundMedia } from "./inbound-media.js";
+import { resolveMSTeamsInboundMedia, resolveMSTeamsInboundMediaBody } from "./inbound-media.js";
 
 const baseParams = {
   maxBytes: 1024 * 1024,
@@ -34,7 +35,56 @@ const baseParams = {
   log: { debug: vi.fn() },
 };
 
+function firstGraphMediaCall() {
+  const [call] = vi.mocked(downloadMSTeamsGraphMedia).mock.calls;
+  if (!call) {
+    throw new Error("expected Graph media download call");
+  }
+  return call[0];
+}
+
+function firstBotFrameworkAttachmentCall() {
+  const [call] = vi.mocked(downloadMSTeamsBotFrameworkAttachments).mock.calls;
+  if (!call) {
+    throw new Error("expected Bot Framework attachment download call");
+  }
+  return call[0];
+}
+
 describe("resolveMSTeamsInboundMedia graph fallback trigger", () => {
+  it("replaces a failed attachment placeholder without marking mention-only HTML", () => {
+    expect(
+      resolveMSTeamsInboundMediaBody({
+        body: "<media:document>",
+        mediaPlaceholder: "<media:document>",
+        materializedMediaPlaceholder: "",
+        expectedMediaCount: 1,
+        mediaCount: 0,
+      }),
+    ).toBe("[msteams attachment unavailable]");
+    expect(
+      resolveMSTeamsInboundMediaBody({
+        body: "hello",
+        mediaPlaceholder: "<media:document>",
+        materializedMediaPlaceholder: "",
+        expectedMediaCount: 0,
+        mediaCount: 0,
+      }),
+    ).toBe("hello");
+  });
+
+  it("preserves successful media while exposing partial download failures", () => {
+    expect(
+      resolveMSTeamsInboundMediaBody({
+        body: "<media:document> (2 files)",
+        mediaPlaceholder: "<media:document> (2 files)",
+        materializedMediaPlaceholder: "<media:document>",
+        expectedMediaCount: 2,
+        mediaCount: 1,
+      }),
+    ).toBe("<media:document>\n\n[msteams attachment unavailable]");
+  });
+
   it("triggers Graph fallback when HTML contains <attachment> tags", async () => {
     vi.mocked(downloadMSTeamsAttachments).mockResolvedValue([]);
     vi.mocked(extractMSTeamsHtmlAttachmentIds).mockReturnValueOnce(["att-0"]);
@@ -133,14 +183,23 @@ describe("resolveMSTeamsInboundMedia graph fallback trigger", () => {
       ],
     });
 
-    const call = vi.mocked(downloadMSTeamsGraphMedia).mock.calls[0]?.[0];
+    const call = firstGraphMediaCall();
     // The monitor handler's logger is forwarded so graph.ts can report
     // message fetch failures instead of swallowing them (#51749).
     expect(call?.logger).toBe(log);
-    expect(log.debug).toHaveBeenCalledWith(
-      "graph media fetch empty",
-      expect.objectContaining({ attachmentIdCount: 1 }),
-    );
+    expect(log.debug).toHaveBeenCalledWith("graph media fetch empty", {
+      attempts: [
+        {
+          url: "https://graph.microsoft.com/v1.0/chats/c/messages/m",
+          hostedStatus: undefined,
+          attachmentStatus: undefined,
+          hostedCount: undefined,
+          attachmentCount: undefined,
+          tokenError: undefined,
+        },
+      ],
+      attachmentIdCount: 1,
+    });
   });
 });
 
@@ -178,7 +237,7 @@ describe("resolveMSTeamsInboundMedia bot framework DM routing", () => {
     });
 
     expect(downloadMSTeamsBotFrameworkAttachments).toHaveBeenCalledTimes(1);
-    const call = vi.mocked(downloadMSTeamsBotFrameworkAttachments).mock.calls[0]?.[0];
+    const call = firstBotFrameworkAttachmentCall();
     expect(call?.serviceUrl).toBe(dmParams.serviceUrl);
     expect(call?.attachmentIds).toEqual(["att-0", "att-1"]);
     expect(downloadMSTeamsGraphMedia).not.toHaveBeenCalled();
@@ -280,10 +339,10 @@ describe("resolveMSTeamsInboundMedia bot framework DM routing", () => {
     expect(downloadMSTeamsGraphMedia).not.toHaveBeenCalled();
     expect(log.debug).toHaveBeenCalledWith(
       "bot framework attachment skipped (missing serviceUrl)",
-      expect.objectContaining({
+      {
         conversationType: "personal",
         conversationId: "a:bf-dm-id",
-      }),
+      },
     );
   });
 });

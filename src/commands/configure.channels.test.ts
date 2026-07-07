@@ -1,3 +1,4 @@
+// Configure channels tests cover interactive channel selection, account prompts, and config mutation.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const select = vi.hoisted(() => vi.fn());
@@ -14,7 +15,7 @@ vi.mock("../channels/chat-meta.js", () => ({
   listChatChannels: () => chatChannels(),
 }));
 
-vi.mock("../terminal/note.js", () => ({
+vi.mock("../../packages/terminal-core/src/note.js", () => ({
   note: (...args: unknown[]) => note(...args),
 }));
 
@@ -47,14 +48,18 @@ function selectArg(index = 0): {
   options?: Array<{ value: unknown; label: string }>;
 } {
   const call = select.mock.calls[index];
-  expect(call).toBeDefined();
-  return call?.[0] as { message?: string; options?: Array<{ value: unknown; label: string }> };
+  if (!call) {
+    throw new Error(`Expected select call ${index}`);
+  }
+  return call[0] as { message?: string; options?: Array<{ value: unknown; label: string }> };
 }
 
 function confirmArg(index = 0): { message?: string } {
   const call = confirm.mock.calls[index];
-  expect(call).toBeDefined();
-  return call?.[0] as { message?: string };
+  if (!call) {
+    throw new Error(`Expected confirm call ${index}`);
+  }
+  return call[0] as { message?: string };
 }
 
 function expectOption(

@@ -1,9 +1,13 @@
+// Diffs tests cover config plugin behavior.
 import fs from "node:fs";
+import os from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import AjvPkg from "ajv";
-import type { JsonSchemaObject } from "openclaw/plugin-sdk/config-schema";
-import { describe, expect, it, vi } from "vitest";
+import {
+  validateJsonSchemaValue,
+  type JsonSchemaObject,
+} from "openclaw/plugin-sdk/json-schema-runtime";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_DIFFS_PLUGIN_SECURITY,
   DEFAULT_DIFFS_TOOL_DEFAULTS,
@@ -13,10 +17,14 @@ import {
   resolveDiffsPluginSecurity,
   resolveDiffsPluginViewerBaseUrl,
 } from "./config.js";
+import { resolveDiffsLanguagePackAvailability } from "./plugin.js";
+import { ensureCuratedViewerRuntimeForTests } from "./test-helpers.js";
 import { buildViewerUrl, normalizeViewerBaseUrl } from "./url.js";
 import {
+  getServedLanguagePackViewerAsset,
   getServedViewerAsset,
   resolveViewerRuntimeFileUrl,
+  LANGUAGE_PACK_VIEWER_LOADER_PATH,
   VIEWER_LOADER_PATH,
   VIEWER_RUNTIME_PATH,
 } from "./viewer-assets.js";
@@ -40,18 +48,27 @@ const FULL_DEFAULTS = {
   ttlSeconds: 21_600,
 } as const;
 
+beforeAll(async () => {
+  await ensureCuratedViewerRuntimeForTests();
+});
+
 function compileManifestConfigSchema() {
   const manifest = JSON.parse(
     fs.readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
   ) as { configSchema: JsonSchemaObject };
-  const Ajv = AjvPkg as unknown as new (opts?: object) => import("ajv").default;
-  const ajv = new Ajv({ allErrors: true, strict: false, useDefaults: true });
-  return ajv.compile(manifest.configSchema);
+  return (value: unknown) =>
+    validateJsonSchemaValue({
+      cacheKey: "diffs.manifest.config.test",
+      schema: manifest.configSchema,
+      value,
+      applyDefaults: true,
+    });
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  expect(value, label).toBeTypeOf("object");
-  expect(value, label).not.toBeNull();
+  if (!value || typeof value !== "object") {
+    throw new Error(`expected ${label}`);
+  }
   return value as Record<string, unknown>;
 }
 
@@ -199,6 +216,20 @@ describe("resolveDiffsPluginDefaults", () => {
     );
   });
 
+  it("prefers an explicit canonical default value over a deprecated alias", () => {
+    expectFields(
+      resolveDiffsPluginDefaults({
+        defaults: {
+          fileFormat: "png",
+          imageFormat: "pdf",
+        },
+      }),
+      {
+        fileFormat: "png",
+      },
+    );
+  });
+
   it("accepts plugin-wide artifact TTL defaults", () => {
     expectFields(
       resolveDiffsPluginDefaults({
@@ -223,7 +254,7 @@ describe("resolveDiffsPluginDefaults", () => {
     );
   });
 
-  it("keeps loader-applied schema defaults from shadowing aliases and quality-derived defaults", () => {
+  it("keeps alias-only config values after manifest validation", () => {
     const validate = compileManifestConfigSchema();
 
     const aliasOnly = {
@@ -232,8 +263,11 @@ describe("resolveDiffsPluginDefaults", () => {
         imageQuality: "hq",
       },
     };
-    expect(validate(aliasOnly)).toBe(true);
-    expectFields(resolveDiffsPluginDefaults(aliasOnly), {
+    const validatedAliasOnly = validate(aliasOnly);
+    if (!validatedAliasOnly.ok) {
+      throw new Error("Expected alias-only config to pass manifest validation.");
+    }
+    expectFields(resolveDiffsPluginDefaults(validatedAliasOnly.value), {
       fileFormat: "pdf",
       fileQuality: "hq",
       fileScale: 2.5,
@@ -245,8 +279,11 @@ describe("resolveDiffsPluginDefaults", () => {
         fileQuality: "hq",
       },
     };
-    expect(validate(qualityOnly)).toBe(true);
-    expectFields(resolveDiffsPluginDefaults(qualityOnly), {
+    const validatedQualityOnly = validate(qualityOnly);
+    if (!validatedQualityOnly.ok) {
+      throw new Error("Expected quality-only config to pass manifest validation.");
+    }
+    expectFields(resolveDiffsPluginDefaults(validatedQualityOnly.value), {
       fileQuality: "hq",
       fileScale: 2.5,
       fileMaxWidth: 1200,
@@ -284,10 +321,10 @@ describe("diffs plugin schema surfaces", () => {
   it("rejects invalid viewerBaseUrl values at manifest-validation time too", () => {
     const validate = compileManifestConfigSchema();
 
-    expect(validate({ viewerBaseUrl: "javascript:alert(1)" })).toBe(false);
-    expect(validate({ viewerBaseUrl: "https://example.com/openclaw?x=1" })).toBe(false);
-    expect(validate({ viewerBaseUrl: "https://example.com/openclaw#frag" })).toBe(false);
-    expect(validate({ viewerBaseUrl: "https://example.com/openclaw/" })).toBe(true);
+    expect(validate({ viewerBaseUrl: "javascript:alert(1)" }).ok).toBe(false);
+    expect(validate({ viewerBaseUrl: "https://example.com/openclaw?x=1" }).ok).toBe(false);
+    expect(validate({ viewerBaseUrl: "https://example.com/openclaw#frag" }).ok).toBe(false);
+    expect(validate({ viewerBaseUrl: "https://example.com/openclaw/" }).ok).toBe(true);
   });
 
   it("preserves defaults and security for direct safeParse callers", () => {
@@ -327,7 +364,7 @@ describe("diffs plugin schema surfaces", () => {
     expectFields(data.security, { allowRemoteViewer: true });
   });
 
-  it("canonicalizes alias-driven defaults for direct safeParse callers", () => {
+  it("resolves deprecated aliases before safeParse applies runtime defaults", () => {
     const parsed = requireRecord(
       diffsPluginConfigSchema.safeParse?.({
         defaults: {
@@ -513,9 +550,53 @@ describe("viewer assets", () => {
     expect(String(runtime?.body)).toContain('style.gap="6px"');
   });
 
+  it("serves the optional language-pack loader only when its generated runtime is present", async () => {
+    const loader = await getServedLanguagePackViewerAsset(LANGUAGE_PACK_VIEWER_LOADER_PATH);
+
+    if (!loader) {
+      expect(loader).toBeNull();
+      return;
+    }
+    expect(loader.contentType).toBe("text/javascript; charset=utf-8");
+    expect(String(loader.body)).toContain(`./viewer-runtime.js?v=`);
+  });
+
   it("returns null for unknown asset paths", async () => {
     await expect(getServedViewerAsset("/plugins/diffs/assets/not-real.js")).resolves.toBeNull();
   });
+});
+
+describe("resolveDiffsLanguagePackAvailability", () => {
+  it.each(["assets", "dist/assets"])(
+    "requires both the sibling language-pack manifest and generated runtime asset in %s",
+    (assetDir) => {
+      const root = fs.mkdtempSync(join(os.tmpdir(), "openclaw-diffs-language-pack-"));
+      try {
+        const diffsRoot = join(root, "diffs");
+        const languagePackRoot = join(root, "diffs-language-pack");
+        fs.mkdirSync(diffsRoot, { recursive: true });
+        fs.mkdirSync(languagePackRoot, { recursive: true });
+        fs.writeFileSync(
+          join(languagePackRoot, "openclaw.plugin.json"),
+          '{"id":"diffs-language-pack"}\n',
+        );
+        const api = {
+          rootDir: diffsRoot,
+          config: { plugins: {} },
+          runtime: { config: { current: () => ({ plugins: {} }) } },
+        } as Parameters<typeof resolveDiffsLanguagePackAvailability>[0];
+
+        expect(resolveDiffsLanguagePackAvailability(api)).toBe(false);
+
+        fs.mkdirSync(join(languagePackRoot, assetDir), { recursive: true });
+        fs.writeFileSync(join(languagePackRoot, assetDir, "viewer-runtime.js"), "export {};\n");
+
+        expect(resolveDiffsLanguagePackAvailability(api)).toBe(true);
+      } finally {
+        fs.rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
 });
 
 describe("parseViewerPayloadJson", () => {

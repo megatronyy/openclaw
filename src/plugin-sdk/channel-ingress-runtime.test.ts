@@ -1,3 +1,4 @@
+// Channel ingress runtime tests cover inbound message normalization and runtime contracts.
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { AccessFacts } from "../channels/turn/types.js";
 import {
@@ -35,12 +36,11 @@ describe("plugin-sdk/channel-ingress-runtime", () => {
       command: { useAccessGroups: true, allowTextCommands: true, hasControlCommand: true },
     });
 
-    expect(projectIngressAccessFacts(commandMessage.ingress).commands).toMatchObject({
-      authorized: true,
-      authorizers: [],
-      useAccessGroups: true,
-      allowTextCommands: true,
-    });
+    const commandFacts = projectIngressAccessFacts(commandMessage.ingress).commands;
+    expect(commandFacts?.authorized).toBe(true);
+    expect(commandFacts?.authorizers).toEqual([]);
+    expect(commandFacts?.useAccessGroups).toBe(true);
+    expect(commandFacts?.allowTextCommands).toBe(true);
   });
 
   it("keeps command authorizers required on public AccessFacts", () => {
@@ -60,7 +60,8 @@ describe("plugin-sdk/channel-ingress-runtime", () => {
       command: { useAccessGroups: true, allowTextCommands: true, hasControlCommand: true },
     });
     expect(readStoreAllowFrom).toHaveBeenCalledOnce();
-    expect(allowed.ingress).toMatchObject({ admission: "dispatch", decision: "allow" });
+    expect(allowed.ingress.admission).toBe("dispatch");
+    expect(allowed.ingress.decision).toBe("allow");
     expect(allowed.commandAccess.authorized).toBe(true);
     expect(JSON.stringify(allowed.state)).not.toContain(sender);
     expect(JSON.stringify(allowed.ingress)).not.toContain(sender);
@@ -89,10 +90,8 @@ describe("plugin-sdk/channel-ingress-runtime", () => {
       },
     });
     expect(unauthorizedCommand.ingress.reasonCode).toBe("control_command_unauthorized");
-    expect(unauthorizedCommand.senderAccess).toMatchObject({
-      decision: "allow",
-      reasonCode: "group_policy_open",
-    });
+    expect(unauthorizedCommand.senderAccess.decision).toBe("allow");
+    expect(unauthorizedCommand.senderAccess.reasonCode).toBe("group_policy_open");
     expect(unauthorizedCommand.commandAccess.shouldBlockControlCommand).toBe(true);
   });
 

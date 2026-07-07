@@ -1,12 +1,16 @@
+// Sends session maintenance warnings before warn-only cleanup.
 import type { SessionMaintenanceWarning } from "../config/sessions/store-maintenance.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { createLazyPromiseLoader } from "../shared/lazy-runtime.js";
 import { deliveryContextFromSession } from "../utils/delivery-context.shared.js";
 import { isDeliverableMessageChannel, normalizeMessageChannel } from "../utils/message-channel.js";
 import { buildOutboundSessionContext } from "./outbound/session-context.js";
 import { enqueueSystemEvent } from "./system-events.js";
 
+// Session maintenance warnings notify an active session before warn-only
+// cleanup would prune it, with per-session dedupe and system-event fallback.
 type WarningParams = {
   cfg: OpenClawConfig;
   sessionKey: string;
@@ -16,21 +20,21 @@ type WarningParams = {
 
 const warnedContexts = new Map<string, string>();
 const log = createSubsystemLogger("session-maintenance-warning");
-let messageRuntimePromise: Promise<typeof import("../channels/message/runtime.js")> | null = null;
+const messageRuntimeLoader = createLazyPromiseLoader(
+  () => import("../channels/message/runtime.js"),
+  { cacheRejections: true },
+);
 
 function resetSessionMaintenanceWarningForTests() {
   warnedContexts.clear();
-  messageRuntimePromise = null;
+  messageRuntimeLoader.clear();
 }
 
-export const __testing = {
+export const testing = {
   resetSessionMaintenanceWarningForTests,
 } as const;
 
-function loadDeliverRuntime() {
-  messageRuntimePromise ??= import("../channels/message/runtime.js");
-  return messageRuntimePromise;
-}
+const loadDeliverRuntime = messageRuntimeLoader.load;
 
 function shouldSendWarning(): boolean {
   return process.env.NODE_ENV !== "test";
@@ -50,20 +54,20 @@ function buildWarningContext(params: WarningParams): string {
 }
 
 function formatDuration(ms: number): string {
-  if (ms >= 86_400_000) {
-    const days = Math.round(ms / 86_400_000);
-    return `${days} day${days === 1 ? "" : "s"}`;
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) {
+    return `${secs} second${secs === 1 ? "" : "s"}`;
   }
-  if (ms >= 3_600_000) {
-    const hours = Math.round(ms / 3_600_000);
-    return `${hours} hour${hours === 1 ? "" : "s"}`;
-  }
-  if (ms >= 60_000) {
-    const mins = Math.round(ms / 60_000);
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) {
     return `${mins} minute${mins === 1 ? "" : "s"}`;
   }
-  const secs = Math.round(ms / 1000);
-  return `${secs} second${secs === 1 ? "" : "s"}`;
+  const hours = Math.round(ms / 3_600_000);
+  if (hours < 24) {
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  const days = Math.round(ms / 86_400_000);
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 
 function buildWarningText(warning: SessionMaintenanceWarning): string {
@@ -100,6 +104,7 @@ function resolveWarningDeliveryTarget(entry: SessionEntry): {
   };
 }
 
+/** Deliver or enqueue a warn-only session maintenance notification. */
 export async function deliverSessionMaintenanceWarning(params: WarningParams): Promise<void> {
   if (!shouldSendWarning()) {
     return;
@@ -109,6 +114,8 @@ export async function deliverSessionMaintenanceWarning(params: WarningParams): P
   if (warnedContexts.get(params.sessionKey) === contextKey) {
     return;
   }
+  // Dedupe by effective warning context so repeated maintenance scans do not
+  // spam the same session, but changed limits still produce a fresh warning.
   warnedContexts.set(params.sessionKey, contextKey);
 
   const text = buildWarningText(params.warning);
@@ -148,3 +155,4 @@ export async function deliverSessionMaintenanceWarning(params: WarningParams): P
     enqueueSystemEvent(text, { sessionKey: params.sessionKey });
   }
 }
+export { testing as __testing };

@@ -1,3 +1,4 @@
+// Command execution startup tests cover startup behavior before CLI command execution.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const emitCliBannerMock = vi.hoisted(() => vi.fn());
@@ -45,7 +46,7 @@ describe("command-execution-startup", () => {
       startupPolicy: {
         suppressDoctorStdout: true,
         hideBanner: false,
-        skipConfigGuard: true,
+        skipConfigGuard: false,
         loadPlugins: false,
         pluginRegistry: { scope: "channels" },
       },
@@ -110,6 +111,25 @@ describe("command-execution-startup", () => {
     ).toBe(true);
   });
 
+  it("uses the resolved action command path for protocol startup policy", () => {
+    expect(
+      mod.resolveCliExecutionStartupContext({
+        argv: ["node", "openclaw", "acp", "--token", "-secret"],
+        protocolCommandPath: ["acp"],
+        jsonOutputMode: false,
+        env: {},
+      }).startupPolicy.suppressDoctorStdout,
+    ).toBe(true);
+    expect(
+      mod.resolveCliExecutionStartupContext({
+        argv: ["node", "openclaw", "acp", "--verbose", "client"],
+        protocolCommandPath: ["acp", "client"],
+        jsonOutputMode: false,
+        env: {},
+      }).startupPolicy.suppressDoctorStdout,
+    ).toBe(false);
+  });
+
   it("routes logs to stderr and emits banner only when allowed", async () => {
     await mod.applyCliExecutionStartupPresentation({
       startupPolicy: {
@@ -143,6 +163,23 @@ describe("command-execution-startup", () => {
     expect(emitCliBannerMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not import the banner module for JSON output", async () => {
+    await mod.applyCliExecutionStartupPresentation({
+      startupPolicy: {
+        suppressDoctorStdout: true,
+        hideBanner: false,
+        skipConfigGuard: false,
+        loadPlugins: false,
+        pluginRegistry: { scope: "channels" },
+      },
+      version: "1.2.3",
+      argv: ["node", "openclaw", "status", "--json"],
+    });
+
+    expect(routeLogsToStderrMock).toHaveBeenCalledTimes(1);
+    expect(emitCliBannerMock).not.toHaveBeenCalled();
+  });
+
   it("forwards startup policy into bootstrap defaults and overrides", async () => {
     const statusRuntime = {} as never;
     await mod.ensureCliExecutionBootstrap({
@@ -151,7 +188,7 @@ describe("command-execution-startup", () => {
       startupPolicy: {
         suppressDoctorStdout: true,
         hideBanner: false,
-        skipConfigGuard: true,
+        skipConfigGuard: false,
         loadPlugins: false,
         pluginRegistry: { scope: "channels" },
       },
@@ -164,7 +201,7 @@ describe("command-execution-startup", () => {
       allowInvalid: undefined,
       loadPlugins: false,
       pluginRegistry: { scope: "channels" },
-      skipConfigGuard: true,
+      skipConfigGuard: false,
     });
 
     const messageRuntime = {} as never;

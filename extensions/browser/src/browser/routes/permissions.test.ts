@@ -1,3 +1,4 @@
+// Browser tests cover permissions plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createBrowserRouteApp, createBrowserRouteResponse } from "./test-helpers.js";
 
@@ -37,13 +38,17 @@ vi.mock("../cdp.helpers.js", () => ({
   withCdpSocket: cdpMocks.withCdpSocket,
 }));
 
-const { registerBrowserPermissionRoutes, __testing } = await import("./permissions.js");
+const { registerBrowserPermissionRoutes, testing } = await import("./permissions.js");
 
-function createProfileContext() {
+function createProfileContext(overrides: Record<string, unknown> = {}) {
   return {
     profile: {
       name: "openclaw",
       cdpUrl: "http://127.0.0.1:18800",
+      cdpHost: "127.0.0.1",
+      cdpIsLoopback: true,
+      driver: "openclaw",
+      ...overrides,
     },
     ensureBrowserAvailable: vi.fn(async () => {}),
     ensureTabAvailable: vi.fn(),
@@ -60,9 +65,12 @@ function createProfileContext() {
   };
 }
 
-function createRouteContext(profileCtx: ReturnType<typeof createProfileContext>) {
+function createRouteContext(
+  profileCtx: ReturnType<typeof createProfileContext>,
+  ssrfPolicy: Record<string, unknown> = { allowPrivateNetwork: false },
+) {
   return {
-    state: () => ({ resolved: { ssrfPolicy: { allowPrivateNetwork: false } } }),
+    state: () => ({ resolved: { ssrfPolicy } }),
     forProfile: () => profileCtx,
     listProfiles: vi.fn(async () => []),
     mapTabError: vi.fn(() => null),
@@ -70,10 +78,16 @@ function createRouteContext(profileCtx: ReturnType<typeof createProfileContext>)
   };
 }
 
-async function callGrant(body: Record<string, unknown>) {
+async function callGrant(
+  body: Record<string, unknown>,
+  options: {
+    profile?: Record<string, unknown>;
+    ssrfPolicy?: Record<string, unknown>;
+  } = {},
+) {
   const { app, postHandlers } = createBrowserRouteApp();
-  const profileCtx = createProfileContext();
-  registerBrowserPermissionRoutes(app, createRouteContext(profileCtx) as never);
+  const profileCtx = createProfileContext(options.profile);
+  registerBrowserPermissionRoutes(app, createRouteContext(profileCtx, options.ssrfPolicy) as never);
   const handler = postHandlers.get("/permissions/grant");
   expect(handler).toBeTypeOf("function");
 
@@ -87,7 +101,7 @@ describe("browser permission routes", () => {
     cdpMocks.getChromeWebSocketUrl.mockClear();
     cdpMocks.send.mockReset().mockResolvedValue({});
     cdpMocks.withCdpSocket.mockClear();
-    __testing.setDepsForTest(null);
+    testing.setDepsForTest(null);
     pwMocks.getPwAiModule.mockReset().mockResolvedValue(null);
     pwMocks.getPageForTargetId.mockClear();
     pwMocks.grantPermissions.mockClear();
@@ -97,7 +111,7 @@ describe("browser permission routes", () => {
     pwMocks.getPwAiModule.mockResolvedValue({
       getPageForTargetId: pwMocks.getPageForTargetId,
     } as never);
-    __testing.setDepsForTest({ getPwAiModule: pwMocks.getPwAiModule as never });
+    testing.setDepsForTest({ getPwAiModule: pwMocks.getPwAiModule as never });
 
     const { response } = await callGrant({
       origin: "https://meet.google.com/abc-defg-hij",
@@ -107,7 +121,7 @@ describe("browser permission routes", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.body).toMatchObject({
+    expect(response.body).toStrictEqual({
       ok: true,
       origin: "https://meet.google.com",
       grantedPermissions: ["audioCapture", "videoCapture"],
@@ -117,7 +131,7 @@ describe("browser permission routes", () => {
     expect(pwMocks.getPageForTargetId).toHaveBeenCalledWith({
       cdpUrl: "http://127.0.0.1:18800",
       targetId: "meet-tab",
-      ssrfPolicy: { allowPrivateNetwork: false },
+      ssrfPolicy: undefined,
     });
     expect(pwMocks.grantPermissions).toHaveBeenCalledWith(["microphone", "camera"], {
       origin: "https://meet.google.com",
@@ -134,20 +148,84 @@ describe("browser permission routes", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.body).toMatchObject({
+    expect(response.body).toStrictEqual({
       ok: true,
       origin: "https://meet.google.com",
       grantedPermissions: ["audioCapture", "videoCapture", "speakerSelection"],
       unsupportedPermissions: [],
+      grantMethod: "cdp",
     });
     expect(profileCtx.ensureBrowserAvailable).toHaveBeenCalled();
-    expect(cdpMocks.getChromeWebSocketUrl).toHaveBeenCalledWith("http://127.0.0.1:18800", 1234, {
-      allowPrivateNetwork: false,
-    });
+    expect(cdpMocks.getChromeWebSocketUrl).toHaveBeenCalledWith(
+      "http://127.0.0.1:18800",
+      1234,
+      undefined,
+    );
     expect(cdpMocks.send).toHaveBeenCalledWith("Browser.grantPermissions", {
       origin: "https://meet.google.com",
       permissions: ["audioCapture", "videoCapture", "speakerSelection"],
     });
+  });
+
+  it("rejects loose timeoutMs values before granting permissions", async () => {
+    const { response, profileCtx } = await callGrant({
+      origin: "https://meet.google.com",
+      permissions: ["audioCapture"],
+      timeoutMs: "1e3",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toStrictEqual({ error: "timeoutMs must be a positive integer." });
+    expect(profileCtx.ensureBrowserAvailable).not.toHaveBeenCalled();
+    expect(cdpMocks.getChromeWebSocketUrl).not.toHaveBeenCalled();
+    expect(cdpMocks.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps the minimum permission timeout for small valid values", async () => {
+    const { response } = await callGrant({
+      origin: "https://meet.google.com",
+      permissions: ["audioCapture"],
+      timeoutMs: "1",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(cdpMocks.getChromeWebSocketUrl).toHaveBeenCalledWith(
+      "http://127.0.0.1:18800",
+      1000,
+      undefined,
+    );
+  });
+
+  it("uses exact remote CDP control policy for permission discovery", async () => {
+    const { response } = await callGrant(
+      {
+        origin: "https://meet.google.com",
+        permissions: ["audioCapture"],
+      },
+      {
+        profile: {
+          name: "remote",
+          cdpUrl: "https://browser.example:9222",
+          cdpHost: "browser.example",
+          cdpIsLoopback: false,
+        },
+        ssrfPolicy: {
+          allowPrivateNetwork: true,
+          allowedOrigins: ["https://navigation.example"],
+        },
+      },
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(cdpMocks.getChromeWebSocketUrl).toHaveBeenCalledWith(
+      "https://browser.example:9222",
+      5000,
+      {
+        allowPrivateNetwork: true,
+        allowedHostnames: ["browser.example"],
+        hostnameAllowlist: ["browser.example"],
+      },
+    );
   });
 
   it("keeps required permissions when an optional permission is unsupported", async () => {
@@ -166,10 +244,12 @@ describe("browser permission routes", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.body).toMatchObject({
+    expect(response.body).toStrictEqual({
       ok: true,
+      origin: "https://meet.google.com",
       grantedPermissions: ["audioCapture", "videoCapture"],
       unsupportedPermissions: ["speakerSelection"],
+      grantMethod: "cdp",
     });
     expect(cdpMocks.send).toHaveBeenNthCalledWith(2, "Browser.grantPermissions", {
       origin: "https://meet.google.com",

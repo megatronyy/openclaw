@@ -1,3 +1,4 @@
+// Covers plugin tool descriptor cache lifecycle and invalidation.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
@@ -121,6 +122,29 @@ describe("plugin tool descriptor cache keys", () => {
     });
 
     expect(firstKey).not.toBe(secondKey);
+  });
+
+  it("varies descriptor keys by trusted owner state", () => {
+    const base = {
+      pluginId: "demo",
+      source: "/tmp/demo.js",
+      contractToolNames: ["owner_tool"],
+      ctx: {
+        workspaceDir: "/tmp/workspace",
+        agentId: "main",
+      },
+    };
+
+    const ownerKey = buildPluginToolDescriptorCacheKey({
+      ...base,
+      ctx: { ...base.ctx, senderIsOwner: true },
+    });
+    const nonOwnerKey = buildPluginToolDescriptorCacheKey({
+      ...base,
+      ctx: { ...base.ctx, senderIsOwner: false },
+    });
+
+    expect(ownerKey).not.toBe(nonOwnerKey);
   });
 
   it("keeps descriptor keys stable across config bookkeeping writes", () => {

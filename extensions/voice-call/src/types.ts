@@ -1,3 +1,4 @@
+// Voice Call type declarations define plugin contracts.
 import { z } from "zod";
 import type { CallMode } from "./config.js";
 
@@ -215,6 +216,15 @@ export type InitiateCallInput = {
   inlineTwiml?: string;
   /** TwiML to serve once before normal webhook-driven call handling resumes. */
   preConnectTwiml?: string;
+  /**
+   * Optional `wss://` URL the carrier should open for bidirectional Media
+   * Streaming on call connect. Used by carriers (e.g. Telnyx) that attach
+   * streaming at dial time. Twilio learns the URL from TwiML so it ignores
+   * this field.
+   */
+  streamUrl?: string;
+  /** Per-call auth token the carrier echoes back on the WS upgrade. */
+  streamAuthToken?: string;
 };
 
 export type InitiateCallResult = {
@@ -231,6 +241,15 @@ export type HangupCallInput = {
 export type AnswerCallInput = {
   callId: CallId;
   providerCallId: ProviderCallId;
+  /**
+   * Optional `wss://` URL the carrier should open for bidirectional Media
+   * Streaming on answer. Used by carriers (e.g. Telnyx) that attach
+   * streaming at answer time. Twilio learns the URL from TwiML so it ignores
+   * this field.
+   */
+  streamUrl?: string;
+  /** Per-call auth token the carrier echoes back on the WS upgrade. */
+  streamAuthToken?: string;
 };
 
 export type PlayTtsInput = {
@@ -239,6 +258,8 @@ export type PlayTtsInput = {
   text: string;
   voice?: string;
   locale?: string;
+  /** Keep collecting speech after playback when the provider owns the listening XML. */
+  listenAfterPlayback?: boolean;
 };
 
 export type SendDtmfInput = {

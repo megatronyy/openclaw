@@ -1,3 +1,4 @@
+// Browser tests cover server context.remote profile tab ops.playwright plugin behavior.
 import { describe, expect, it, vi } from "vitest";
 import {
   installRemoteProfileTestLifecycle,
@@ -28,6 +29,12 @@ async function expectBlockedCdpEndpoint(promise: Promise<unknown>) {
   throw new Error("expected blocked browser CDP endpoint");
 }
 
+const permissiveRemoteCdpPolicy = {
+  allowPrivateNetwork: true,
+  allowedHostnames: ["1.1.1.1"],
+  hostnameAllowlist: ["1.1.1.1"],
+};
+
 describe("browser remote profile tab ops via Playwright", () => {
   it("uses Playwright tab operations when available", async () => {
     const listPagesViaPlaywright = vi.fn(async () => [
@@ -51,6 +58,11 @@ describe("browser remote profile tab ops via Playwright", () => {
 
     const tabs = await remote.listTabs();
     expect(tabs.map((t) => t.targetId)).toEqual(["T1"]);
+    expect(listPagesViaPlaywright).toHaveBeenCalledWith({
+      cdpUrl: "https://1.1.1.1:9222/chrome?token=abc",
+      ssrfPolicy: permissiveRemoteCdpPolicy,
+      timeoutMs: 3000,
+    });
 
     const opened = await remote.openTab("http://127.0.0.1:3000");
     expect(opened.targetId).toBe("T2");
@@ -58,6 +70,7 @@ describe("browser remote profile tab ops via Playwright", () => {
     expect(createPageViaPlaywright).toHaveBeenCalledWith({
       cdpUrl: "https://1.1.1.1:9222/chrome?token=abc",
       url: "http://127.0.0.1:3000",
+      cdpPolicy: permissiveRemoteCdpPolicy,
       ssrfPolicy: { allowPrivateNetwork: true },
     });
 
@@ -65,7 +78,7 @@ describe("browser remote profile tab ops via Playwright", () => {
     expect(closePageByTargetIdViaPlaywright).toHaveBeenCalledWith({
       cdpUrl: "https://1.1.1.1:9222/chrome?token=abc",
       targetId: "T1",
-      ssrfPolicy: { allowPrivateNetwork: true },
+      ssrfPolicy: permissiveRemoteCdpPolicy,
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -208,6 +221,42 @@ describe("browser remote profile tab ops via Playwright", () => {
     expect(second.targetId).toBe("A");
   });
 
+  it("opens a real remote Playwright tab when only browser-internal targets are listed", async () => {
+    const internalTab = {
+      targetId: "OMNI",
+      title: "Omnibox Popup",
+      url: "chrome://omnibox-popup.top-chrome/",
+      type: "page" as const,
+    };
+    const realTab = {
+      targetId: "REAL",
+      title: "New Tab",
+      url: "about:blank",
+      type: "page" as const,
+    };
+    const listPagesViaPlaywright = vi.fn(
+      deps.createSequentialPageLister([[internalTab], [internalTab, realTab]]),
+    );
+    const createPageViaPlaywright = vi.fn(async () => realTab);
+
+    vi.spyOn(deps.pwAiModule, "getPwAiModule").mockResolvedValue({
+      listPagesViaPlaywright,
+      createPageViaPlaywright,
+    } as unknown as Awaited<ReturnType<typeof deps.pwAiModule.getPwAiModule>>);
+
+    const { state, remote } = deps.createRemoteRouteHarness();
+
+    const selected = await remote.ensureTabAvailable();
+    expect(selected.targetId).toBe("REAL");
+    expect(state.profiles.get("remote")?.lastTargetId).toBe("REAL");
+    expect(createPageViaPlaywright).toHaveBeenCalledWith({
+      cdpUrl: "https://1.1.1.1:9222/chrome?token=abc",
+      url: "about:blank",
+      cdpPolicy: permissiveRemoteCdpPolicy,
+      ssrfPolicy: { allowPrivateNetwork: true },
+    });
+  });
+
   it("rejects stale targetId for remote profiles even when only one tab remains", async () => {
     const responses = Array.from({ length: 2 }, () => [page("T1", "https://example.com")]);
     const listPagesViaPlaywright = vi.fn(deps.createSequentialPageLister(responses));
@@ -249,7 +298,7 @@ describe("browser remote profile tab ops via Playwright", () => {
     expect(focusPageByTargetIdViaPlaywright).toHaveBeenCalledWith({
       cdpUrl: "https://1.1.1.1:9222/chrome?token=abc",
       targetId: "T1",
-      ssrfPolicy: { allowPrivateNetwork: true },
+      ssrfPolicy: permissiveRemoteCdpPolicy,
     });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(state.profiles.get("remote")?.lastTargetId).toBe("T1");

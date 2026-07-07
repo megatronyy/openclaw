@@ -1,4 +1,5 @@
-import { verifyChannelMessageAdapterCapabilityProofs } from "openclaw/plugin-sdk/channel-message";
+// Irc tests cover send plugin behavior.
+import { verifyChannelMessageAdapterCapabilityProofs } from "openclaw/plugin-sdk/channel-outbound";
 import { createSendCfgThreadingRuntime } from "openclaw/plugin-sdk/channel-test-helpers";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IrcClient } from "./client.js";
@@ -134,18 +135,29 @@ describe("sendMessageIrc cfg threading", () => {
     expect(result.target).toBe("#room");
     expect(result.messageId).toBeTypeOf("string");
     expect(result.messageId.length).toBeGreaterThan(0);
-    expect(result.receipt).toMatchObject({
+    expect(result.receipt.sentAt).toBeTypeOf("number");
+    expect(result.receipt.sentAt).toBeGreaterThan(0);
+    expect({ ...result.receipt, sentAt: 123 }).toEqual({
       primaryPlatformMessageId: "irc-msg-1",
       platformMessageIds: ["irc-msg-1"],
       parts: [
         {
           platformMessageId: "irc-msg-1",
           kind: "text",
+          index: 0,
           raw: {
             channel: "irc",
             conversationId: "#room",
             messageId: "irc-msg-1",
           },
+        },
+      ],
+      sentAt: 123,
+      raw: [
+        {
+          channel: "irc",
+          conversationId: "#room",
+          messageId: "irc-msg-1",
         },
       ],
     });
@@ -216,12 +228,31 @@ describe("sendMessageIrc cfg threading", () => {
     });
 
     expect(client.sendPrivmsg).toHaveBeenCalledWith("#room", "hello\n\n[reply:irc-parent-1]");
-    expect(result.receipt).toMatchObject({
+    expect(result.receipt.sentAt).toBeTypeOf("number");
+    expect(result.receipt.sentAt).toBeGreaterThan(0);
+    expect({ ...result.receipt, sentAt: 123 }).toEqual({
+      primaryPlatformMessageId: "irc-msg-1",
+      platformMessageIds: ["irc-msg-1"],
       replyToId: "irc-parent-1",
       parts: [
         {
           platformMessageId: "irc-msg-1",
+          kind: "text",
+          index: 0,
           replyToId: "irc-parent-1",
+          raw: {
+            channel: "irc",
+            conversationId: "#room",
+            messageId: "irc-msg-1",
+          },
+        },
+      ],
+      sentAt: 123,
+      raw: [
+        {
+          channel: "irc",
+          conversationId: "#room",
+          messageId: "irc-msg-1",
         },
       ],
     });
@@ -238,9 +269,13 @@ describe("sendMessageIrc cfg threading", () => {
     } as unknown as CoreConfig;
     const client = {
       isReady: vi.fn(() => true),
+      join: vi.fn(),
       sendPrivmsg: vi.fn(),
       quit: vi.fn(),
-    } as unknown as IrcClient & { quit: ReturnType<typeof vi.fn> };
+    } as unknown as IrcClient & {
+      join: ReturnType<typeof vi.fn>;
+      quit: ReturnType<typeof vi.fn>;
+    };
     hoisted.connectIrcClient.mockResolvedValue(client);
 
     const proofResults = await verifyChannelMessageAdapterCapabilityProofs({
@@ -254,6 +289,7 @@ describe("sendMessageIrc cfg threading", () => {
             text: "hello",
           });
           expect(result?.receipt.platformMessageIds).toEqual(["irc-msg-1"]);
+          expect(client.join).toHaveBeenCalledWith("#room");
           expect(client.sendPrivmsg).toHaveBeenCalledWith("#room", "hello");
         },
         media: async () => {
@@ -264,6 +300,7 @@ describe("sendMessageIrc cfg threading", () => {
             mediaUrl: "https://example.com/image.png",
           });
           expect(result?.receipt.platformMessageIds).toEqual(["irc-msg-1"]);
+          expect(client.join).toHaveBeenCalledWith("#room");
           expect(client.sendPrivmsg).toHaveBeenCalledWith(
             "#room",
             "image\n\nAttachment: https://example.com/image.png",
@@ -277,6 +314,7 @@ describe("sendMessageIrc cfg threading", () => {
             replyToId: "parent-1",
           });
           expect(result?.receipt.replyToId).toBe("parent-1");
+          expect(client.join).toHaveBeenCalledWith("#room");
           expect(client.sendPrivmsg).toHaveBeenCalledWith("#room", "threaded\n\n[reply:parent-1]");
         },
       },

@@ -1,5 +1,11 @@
+// Codex tests cover app inventory cache plugin behavior.
+import { MAX_DATE_TIMESTAMP_MS } from "openclaw/plugin-sdk/number-runtime";
 import { describe, expect, it, vi } from "vitest";
-import { CodexAppInventoryCache, buildCodexAppInventoryCacheKey } from "./app-inventory-cache.js";
+import {
+  CodexAppInventoryCache,
+  buildCodexAppInventoryCacheKey,
+  serializeCodexAppInventoryError,
+} from "./app-inventory-cache.js";
 import type { v2 } from "./protocol.js";
 
 describe("Codex app inventory cache", () => {
@@ -12,7 +18,11 @@ describe("Codex app inventory cache", () => {
       } satisfies v2.AppsListResponse;
     });
 
-    const key = buildCodexAppInventoryCacheKey({ codexHome: "/codex", authProfileId: "work" });
+    const key = buildCodexAppInventoryCacheKey(
+      { codexHome: "/codex", authProfileId: "work" },
+      "2026.6.27",
+      "2026.6.27",
+    );
     const read = cache.read({ key, request, nowMs: 0 });
     expect(read.state).toBe("missing");
     expect(read.refreshScheduled).toBe(true);
@@ -27,7 +37,103 @@ describe("Codex app inventory cache", () => {
     expect(fresh.snapshot?.apps.map((item) => item.id)).toEqual(["app-1", "app-2"]);
   });
 
-  it("uses stale inventory for the current read while refreshing asynchronously", async () => {
+  it("changes the cache key when either build version changes", () => {
+    const input = { codexHome: "/codex", authProfileId: "work" };
+    const baseline = buildCodexAppInventoryCacheKey(input, "2026.6.27", "2026.6.27");
+
+    expect(buildCodexAppInventoryCacheKey(input, "2026.6.28", "2026.6.27")).not.toBe(baseline);
+    expect(buildCodexAppInventoryCacheKey(input, "2026.6.27", "2026.6.28")).not.toBe(baseline);
+  });
+
+  it("can read missing inventory without scheduling app/list", async () => {
+    const cache = new CodexAppInventoryCache({ ttlMs: 100 });
+    const request = vi.fn(async () => {
+      return {
+        data: [app("app-1")],
+        nextCursor: null,
+      } satisfies v2.AppsListResponse;
+    });
+
+    const read = cache.read({
+      key: "runtime",
+      request,
+      suppressRefresh: true,
+    });
+
+    expect(read.state).toBe("missing");
+    expect(read.refreshScheduled).toBe(false);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("finds a targeted app on a later large page", async () => {
+    const cache = new CodexAppInventoryCache({ ttlMs: 100 });
+    const request = vi.fn(async (_method: "app/list", params: v2.AppsListParams) => {
+      return {
+        data: [app(params.cursor ? "google-calendar-app" : "app-1")],
+        nextCursor: params.cursor ? "page-3" : "page-2",
+      } satisfies v2.AppsListResponse;
+    });
+
+    const snapshot = await cache.refreshNow({
+      key: "runtime",
+      request,
+      targetAppIds: ["google-calendar-app"],
+    });
+
+    expect(snapshot.apps.map((item) => item.id)).toEqual(["app-1", "google-calendar-app"]);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenNthCalledWith(1, "app/list", {
+      cursor: undefined,
+      limit: 1_000,
+      forceRefetch: false,
+    });
+    expect(request).toHaveBeenNthCalledWith(2, "app/list", {
+      cursor: "page-2",
+      limit: 1_000,
+      forceRefetch: false,
+    });
+  });
+
+  it("exhausts targeted refresh pages when a target app is absent", async () => {
+    const cache = new CodexAppInventoryCache({ ttlMs: 100 });
+    const request = vi.fn(async (_method: "app/list", params: v2.AppsListParams) => {
+      return {
+        data: [app(params.cursor ? "app-2" : "app-1")],
+        nextCursor: params.cursor ? null : "page-2",
+      } satisfies v2.AppsListResponse;
+    });
+
+    const snapshot = await cache.refreshNow({
+      key: "runtime",
+      request,
+      targetAppIds: ["missing-app"],
+    });
+
+    expect(snapshot.apps.map((item) => item.id)).toEqual(["app-1", "app-2"]);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a repeated app/list cursor instead of caching a partial snapshot", async () => {
+    const cache = new CodexAppInventoryCache({ ttlMs: 100 });
+    const request = vi.fn(async () => ({
+      data: [app(`app-${request.mock.calls.length}`)],
+      nextCursor: "page-2",
+    }));
+
+    await expect(
+      cache.refreshNow({
+        key: "runtime",
+        request,
+        targetAppIds: ["missing-app"],
+      }),
+    ).rejects.toThrow("app/list returned repeated cursor page-2");
+
+    const read = cache.read({ key: "runtime", request, suppressRefresh: true });
+    expect(read.state).toBe("missing");
+    expect(read.snapshot).toBeUndefined();
+  });
+
+  it("uses stale inventory for the current read while still refreshing asynchronously", async () => {
     const cache = new CodexAppInventoryCache({ ttlMs: 10 });
     const request = vi.fn(async () => {
       return {
@@ -38,13 +144,38 @@ describe("Codex app inventory cache", () => {
     const key = "runtime";
     await cache.refreshNow({ key, request, nowMs: 0 });
 
-    const stale = cache.read({ key, request, nowMs: 11 });
+    const stale = cache.read({ key, request, nowMs: 11, suppressRefresh: true });
     expect(stale.state).toBe("stale");
     expect(stale.snapshot?.apps.map((item) => item.id)).toEqual(["app-1"]);
     expect(stale.refreshScheduled).toBe(true);
 
     const refreshed = await cache.refreshNow({ key, request, nowMs: 11 });
     expect(refreshed.apps.map((item) => item.id)).toEqual(["app-2"]);
+  });
+
+  it("marks inventory stale when the expiry would exceed the Date range", async () => {
+    const cache = new CodexAppInventoryCache({ ttlMs: 100 });
+    const request = vi.fn(async () => {
+      return {
+        data: [app("app-overflow")],
+        nextCursor: null,
+      } satisfies v2.AppsListResponse;
+    });
+    const key = "runtime";
+    const snapshot = await cache.refreshNow({
+      key,
+      request,
+      nowMs: MAX_DATE_TIMESTAMP_MS,
+    });
+
+    expect(snapshot.expiresAtMs).toBe(0);
+    const read = cache.read({
+      key,
+      request,
+      nowMs: Date.parse("2026-05-29T12:00:00.000Z"),
+    });
+    expect(read.state).toBe("stale");
+    expect(read.snapshot?.apps.map((item) => item.id)).toEqual(["app-overflow"]);
   });
 
   it("records refresh errors without discarding the last successful snapshot", async () => {
@@ -73,6 +204,17 @@ describe("Codex app inventory cache", () => {
     });
     expect(read.snapshot?.apps.map((item) => item.id)).toEqual(["app-1"]);
     expect(read.diagnostic?.message).toBe("app list failed");
+  });
+
+  it("omits challenge HTML when serializing app/list errors", () => {
+    const error = new Error(
+      'failed to list apps: Request failed with status 403 Forbidden: <html><script src="/backend-api/connectors/directory/list?__cf_chl_tk=secret-token"></script></html>',
+    );
+    const serialized = serializeCodexAppInventoryError(error);
+
+    expect(serialized.message).toBe(
+      "failed to list apps: Request failed with status 403 Forbidden: [HTML response body omitted]",
+    );
   });
 
   it("forces a post-install refresh past an older in-flight app/list", async () => {

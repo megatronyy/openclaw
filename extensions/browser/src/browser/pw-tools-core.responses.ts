@@ -1,11 +1,12 @@
+/**
+ * Response-body retrieval for Playwright-backed browser tools.
+ */
+import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { ensurePageState, getPageForTargetId } from "./pw-session.js";
 import { normalizeTimeoutMs } from "./pw-tools-core.shared.js";
 import { matchBrowserUrlPattern } from "./url-pattern.js";
 
-function normalizeOptionalString(value: unknown): string | undefined {
-  return typeof value === "string" ? value.trim() || undefined : undefined;
-}
-
+/** Waits for a response URL pattern and returns a bounded text body. */
 export async function responseBodyViaPlaywright(opts: {
   cdpUrl: string;
   targetId?: string;
@@ -28,6 +29,7 @@ export async function responseBodyViaPlaywright(opts: {
       ? Math.max(1, Math.min(5_000_000, Math.floor(opts.maxChars)))
       : 200_000;
   const timeout = normalizeTimeoutMs(opts.timeoutMs, 20_000);
+  const maxBytes = maxChars * 4;
 
   const page = await getPageForTargetId(opts);
   ensurePageState(page);
@@ -35,7 +37,6 @@ export async function responseBodyViaPlaywright(opts: {
   const promise = new Promise<unknown>((resolve, reject) => {
     let done = false;
     let timer: NodeJS.Timeout | undefined;
-    let handler: ((resp: unknown) => void) | undefined;
 
     const cleanup = () => {
       if (timer) {
@@ -47,7 +48,7 @@ export async function responseBodyViaPlaywright(opts: {
       }
     };
 
-    handler = (resp: unknown) => {
+    const handler: ((resp: unknown) => void) | undefined = (resp: unknown) => {
       if (done) {
         return;
       }
@@ -89,12 +90,14 @@ export async function responseBodyViaPlaywright(opts: {
   const headers = resp.headers?.();
 
   let bodyText = "";
+  let bodyByteLength = 0;
   try {
-    if (typeof resp.text === "function") {
-      bodyText = await resp.text();
-    } else if (typeof resp.body === "function") {
+    if (typeof resp.body === "function") {
       const buf = await resp.body();
-      bodyText = new TextDecoder("utf-8").decode(buf);
+      bodyByteLength = buf.byteLength;
+      // Playwright exposes only a full-body Buffer. Bound the second allocation
+      // while preserving the existing response-prefix contract.
+      bodyText = new TextDecoder("utf-8").decode(buf.subarray(0, maxBytes));
     }
   } catch (err) {
     throw new Error(`Failed to read response body for "${url}": ${String(err)}`, { cause: err });
@@ -106,6 +109,6 @@ export async function responseBodyViaPlaywright(opts: {
     status,
     headers,
     body: trimmed,
-    truncated: bodyText.length > maxChars ? true : undefined,
+    truncated: bodyByteLength > maxBytes || bodyText.length > maxChars ? true : undefined,
   };
 }

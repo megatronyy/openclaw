@@ -1,3 +1,4 @@
+// Covers OpenClaw CLI PATH construction.
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureOpenClawCliOnPath } from "./path-env.js";
@@ -231,6 +232,26 @@ describe("ensureOpenClawCliOnPath", () => {
     },
   );
 
+  it("skips project-local bins when the working directory was deleted", () => {
+    const { tmp, appCli } = setupAppCliRoot("case-deleted-cwd");
+    const localBinDir = path.join(tmp, "node_modules", ".bin");
+    setDir(localBinDir);
+    setExe(path.join(localBinDir, "openclaw"));
+    resetBootstrapEnv();
+    process.env.OPENCLAW_ALLOW_PROJECT_LOCAL_BIN = "1";
+    const cwdSpy = vi.spyOn(process, "cwd").mockImplementation(() => {
+      throw new Error("ENOENT: uv_cwd");
+    });
+
+    try {
+      ensureOpenClawCliOnPath({ execPath: appCli, homeDir: tmp, platform: "darwin" });
+    } finally {
+      cwdSpy.mockRestore();
+    }
+
+    expect((process.env.PATH ?? "").split(path.delimiter)).not.toContain(localBinDir);
+  });
+
   it("prepends XDG_BIN_HOME ahead of other user bin fallbacks", () => {
     const { tmp, appCli } = setupAppCliRoot("case-xdg-bin-home");
     const xdgBinHome = path.join(tmp, "xdg-bin");
@@ -365,5 +386,43 @@ describe("ensureOpenClawCliOnPath", () => {
 
     expect(updated).not.toContain(maliciousBin);
     expect(updated).not.toContain(maliciousSbin);
+  });
+
+  it("does not probe Linuxbrew fallbacks on macOS unless already inherited", () => {
+    const { tmp, appCli } = setupAppCliRoot("case-no-darwin-linuxbrew");
+    const homeLinuxbrewBin = path.join(tmp, ".linuxbrew", "bin");
+    const globalLinuxbrewBin = "/home/linuxbrew/.linuxbrew/bin";
+    setDir(path.join(tmp, ".linuxbrew"));
+    setDir(homeLinuxbrewBin);
+    setDir("/home");
+    setDir("/home/linuxbrew");
+    setDir("/home/linuxbrew/.linuxbrew");
+    setDir(globalLinuxbrewBin);
+    resetBootstrapEnv("/usr/bin:/bin");
+
+    const updated = bootstrapPath({
+      execPath: appCli,
+      cwd: tmp,
+      homeDir: tmp,
+      platform: "darwin",
+    });
+
+    expect(updated).not.toContain(homeLinuxbrewBin);
+    expect(updated).not.toContain(globalLinuxbrewBin);
+  });
+
+  it("keeps inherited Linuxbrew path entries on macOS", () => {
+    const { tmp, appCli } = setupAppCliRoot("case-keep-darwin-linuxbrew");
+    const globalLinuxbrewBin = "/home/linuxbrew/.linuxbrew/bin";
+    resetBootstrapEnv(`${globalLinuxbrewBin}:/usr/bin:/bin`);
+
+    const updated = bootstrapPath({
+      execPath: appCli,
+      cwd: tmp,
+      homeDir: tmp,
+      platform: "darwin",
+    });
+
+    expect(updated).toContain(globalLinuxbrewBin);
   });
 });

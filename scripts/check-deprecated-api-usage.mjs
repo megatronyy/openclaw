@@ -1,7 +1,10 @@
 #!/usr/bin/env node
+// Scans source files for usage of deprecated API markers.
 import fs from "node:fs";
 import path from "node:path";
 import { collectDeprecatedInternalConfigApiViolations } from "./lib/deprecated-config-api-guard.mjs";
+import { buildDeprecatedPluginSdkModuleSpecifiers } from "./lib/deprecated-plugin-sdk-usage.mjs";
+import { escapeRegExp } from "./lib/regexp.mjs";
 
 const repoRoot = process.cwd();
 
@@ -11,6 +14,13 @@ const skippedFilePatterns = [
   /\.test\.[cm]?[jt]sx?$/u,
   /\.spec\.[cm]?[jt]sx?$/u,
   /\.e2e\.[cm]?[jt]sx?$/u,
+  /\.test-(?:harness|loader|support)\.[cm]?[jt]sx?$/u,
+  /\.contract-test-support\.[cm]?[jt]sx?$/u,
+  /(?:^|\/)test-(?:helpers|support)\.[cm]?[jt]sx?$/u,
+  /(?:^|\/)(?:test-helpers|test-support)\//u,
+  /^extensions\/test-support\//u,
+  /^src\/channels\/plugins\/contracts\/test-helpers\//u,
+  /^src\/plugins\/contracts\/tts-contract-suites\.ts$/u,
   /\.d\.ts$/u,
 ];
 
@@ -45,10 +55,6 @@ function* walk(dir, rule) {
       yield entryPath;
     }
   }
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function collectIdentifierRuleViolations(rule) {
@@ -130,23 +136,15 @@ const rules = [
   },
   {
     id: "plugin-sdk-compat-subpaths",
-    roots: ["src", "extensions", "packages"],
-    moduleSpecifiers: [
-      "openclaw/plugin-sdk/agent-dir-compat",
-      "openclaw/plugin-sdk/channel-config-schema-legacy",
-      "openclaw/plugin-sdk/channel-reply-pipeline",
-      "openclaw/plugin-sdk/channel-runtime",
-      "openclaw/plugin-sdk/compat",
-      "openclaw/plugin-sdk/discord",
-      "openclaw/plugin-sdk/infra-runtime",
-      "openclaw/plugin-sdk/mattermost",
-      "openclaw/plugin-sdk/matrix",
-      "openclaw/plugin-sdk/telegram-account",
-      "openclaw/plugin-sdk/testing",
-      "openclaw/plugin-sdk/test-utils",
-      "openclaw/plugin-sdk/zalouser",
-    ],
+    roots: ["src", "packages"],
+    moduleSpecifiers: buildDeprecatedPluginSdkModuleSpecifiers(),
     message: "use focused non-deprecated plugin SDK subpaths",
+  },
+  {
+    id: "extension-plugin-sdk-compat-subpaths",
+    roots: ["extensions"],
+    moduleSpecifiers: buildDeprecatedPluginSdkModuleSpecifiers(),
+    message: "extensions must use focused non-deprecated plugin SDK subpaths",
   },
   {
     id: "message-api",
@@ -165,6 +163,7 @@ const rules = [
     allowedFiles: [
       "src/channels/turn/durable-delivery.ts",
       "src/channels/turn/kernel.ts",
+      "src/channels/message/inbound-reply-dispatch.ts",
       "src/infra/outbound/deliver-runtime.ts",
       "src/infra/outbound/deliver.ts",
       "src/plugin-sdk/channel-message-runtime.ts",

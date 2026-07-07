@@ -1,4 +1,6 @@
+// Zalo plugin module implements lifecycle test support behavior.
 import { request as httpRequest } from "node:http";
+import { createPluginRuntimeMediaMock } from "openclaw/plugin-sdk/channel-test-helpers";
 import { expect, vi } from "vitest";
 import type { OpenClawConfig, PluginRuntime } from "../runtime-api.js";
 import type { ResolvedZaloAccount } from "../types.js";
@@ -100,6 +102,7 @@ export function createImageUpdate(params?: {
   displayName?: string;
   chatId?: string;
   photoUrl?: string;
+  caption?: string;
   date?: number;
 }) {
   return {
@@ -107,7 +110,7 @@ export function createImageUpdate(params?: {
     message: {
       date: params?.date ?? 1774086023728,
       chat: { chat_type: "PRIVATE" as const, id: params?.chatId ?? "chat-123" },
-      caption: "",
+      caption: params?.caption ?? "",
       message_id: params?.messageId ?? "msg-123",
       message_type: "CHAT_PHOTO",
       from: {
@@ -122,7 +125,7 @@ export function createImageUpdate(params?: {
 
 export function createImageLifecycleCore() {
   const finalizeInboundContextMock = vi.fn((ctx: Record<string, unknown>) => ctx);
-  const buildChannelTurnContextMock = vi.fn(
+  const buildChannelInboundEventContextMock = vi.fn(
     (params: {
       channel: string;
       accountId?: string;
@@ -167,8 +170,12 @@ export function createImageLifecycleCore() {
       }),
   );
   const recordInboundSessionMock = vi.fn(async () => undefined);
-  const fetchRemoteMediaMock = vi.fn(async () => ({
+  const readRemoteMediaBufferMock = vi.fn(async () => ({
     buffer: Buffer.from("image-bytes"),
+    contentType: "image/jpeg",
+  }));
+  const saveRemoteMediaMock = vi.fn(async () => ({
+    path: "/tmp/zalo-photo.jpg",
     contentType: "image/jpeg",
   }));
   const saveMediaBufferMock = vi.fn(async () => ({
@@ -212,12 +219,14 @@ export function createImageLifecycleCore() {
           () => "code",
         ) as unknown as PluginRuntime["channel"]["text"]["resolveMarkdownTableMode"],
       },
-      media: {
-        fetchRemoteMedia:
-          fetchRemoteMediaMock as unknown as PluginRuntime["channel"]["media"]["fetchRemoteMedia"],
+      media: createPluginRuntimeMediaMock({
+        readRemoteMediaBuffer:
+          readRemoteMediaBufferMock as unknown as PluginRuntime["channel"]["media"]["readRemoteMediaBuffer"],
+        saveRemoteMedia:
+          saveRemoteMediaMock as unknown as PluginRuntime["channel"]["media"]["saveRemoteMedia"],
         saveMediaBuffer:
           saveMediaBufferMock as unknown as PluginRuntime["channel"]["media"]["saveMediaBuffer"],
-      },
+      }) as unknown as PluginRuntime["channel"]["media"],
       reply: {
         finalizeInboundContext:
           finalizeInboundContextMock as unknown as PluginRuntime["channel"]["reply"]["finalizeInboundContext"],
@@ -231,8 +240,8 @@ export function createImageLifecycleCore() {
           async () => undefined,
         ) as unknown as PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"],
       },
-      turn: {
-        run: vi.fn(async (params: Parameters<PluginRuntime["channel"]["turn"]["run"]>[0]) => {
+      inbound: {
+        run: vi.fn(async (params: Parameters<PluginRuntime["channel"]["inbound"]["run"]>[0]) => {
           const input = await params.adapter.ingest(params.raw);
           if (!input) {
             return {
@@ -287,9 +296,9 @@ export function createImageLifecycleCore() {
             routeSessionKey: resolved.routeSessionKey,
             dispatchResult,
           };
-        }) as unknown as PluginRuntime["channel"]["turn"]["run"],
-        runAssembled: vi.fn(
-          async (params: Parameters<PluginRuntime["channel"]["turn"]["runAssembled"]>[0]) => {
+        }) as unknown as PluginRuntime["channel"]["inbound"]["run"],
+        dispatchReply: vi.fn(
+          async (params: Parameters<PluginRuntime["channel"]["inbound"]["dispatchReply"]>[0]) => {
             await params.recordInboundSession({
               storePath: params.storePath,
               sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
@@ -320,9 +329,9 @@ export function createImageLifecycleCore() {
               dispatchResult,
             };
           },
-        ) as unknown as PluginRuntime["channel"]["turn"]["runAssembled"],
+        ) as unknown as PluginRuntime["channel"]["inbound"]["dispatchReply"],
         buildContext:
-          buildChannelTurnContextMock as unknown as PluginRuntime["channel"]["turn"]["buildContext"],
+          buildChannelInboundEventContextMock as unknown as PluginRuntime["channel"]["inbound"]["buildContext"],
       },
       commands: {
         shouldComputeCommandAuthorized: vi.fn(
@@ -341,7 +350,8 @@ export function createImageLifecycleCore() {
     core,
     finalizeInboundContextMock,
     recordInboundSessionMock,
-    fetchRemoteMediaMock,
+    readRemoteMediaBufferMock,
+    saveRemoteMediaMock,
     saveMediaBufferMock,
     readAllowFromStoreMock,
     upsertPairingRequestMock,
@@ -349,7 +359,8 @@ export function createImageLifecycleCore() {
 }
 
 export function expectImageLifecycleDelivery(params: {
-  fetchRemoteMediaMock: ReturnType<typeof vi.fn>;
+  readRemoteMediaBufferMock: ReturnType<typeof vi.fn>;
+  saveRemoteMediaMock?: ReturnType<typeof vi.fn>;
   saveMediaBufferMock: ReturnType<typeof vi.fn>;
   finalizeInboundContextMock: ReturnType<typeof vi.fn>;
   recordInboundSessionMock: ReturnType<typeof vi.fn>;
@@ -362,11 +373,12 @@ export function expectImageLifecycleDelivery(params: {
   const senderName = params.senderName ?? "Test User";
   const mediaPath = params.mediaPath ?? "/tmp/zalo-photo.jpg";
   const mediaType = params.mediaType ?? "image/jpeg";
-  expect(params.fetchRemoteMediaMock).toHaveBeenCalledWith({
+  const saveRemoteMediaMock = params.saveRemoteMediaMock ?? params.readRemoteMediaBufferMock;
+  expect(saveRemoteMediaMock).toHaveBeenCalledWith({
     url: photoUrl,
     maxBytes: 5 * 1024 * 1024,
   });
-  expect(params.saveMediaBufferMock).toHaveBeenCalledTimes(1);
+  expect(params.saveMediaBufferMock).not.toHaveBeenCalled();
   expect(params.finalizeInboundContextMock).toHaveBeenCalledWith(
     expect.objectContaining({
       SenderName: senderName,
@@ -388,7 +400,9 @@ export function expectImageLifecycleDelivery(params: {
 export async function settleAsyncWork(): Promise<void> {
   for (let i = 0; i < 6; i += 1) {
     await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
   }
 }
 

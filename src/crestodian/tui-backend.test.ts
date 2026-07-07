@@ -1,3 +1,4 @@
+// Crestodian TUI backend tests cover rescue status integration with the TUI backend.
 import { describe, expect, it } from "vitest";
 import type { RuntimeEnv } from "../runtime.js";
 import type { CrestodianOverview } from "./overview.js";
@@ -11,6 +12,7 @@ const overview: CrestodianOverview = {
   tools: {
     codex: { command: "codex", found: false, error: "not found" },
     claude: { command: "claude", found: false, error: "not found" },
+    gemini: { command: "gemini", found: false, error: "not found" },
     apiKeys: { openai: true, anthropic: false },
   },
   gateway: {
@@ -55,13 +57,83 @@ describe("runCrestodianTui", () => {
     );
 
     expect(runTuiCalls).toBe(1);
-    expect(runTuiOptions).toMatchObject({
-      local: true,
-      session: "agent:crestodian:main",
-      historyLimit: 200,
-      config: {},
-      title: "openclaw crestodian",
+    const options = runTuiOptions as {
+      local?: boolean;
+      session?: string;
+      historyLimit?: number;
+      config?: unknown;
+      title?: string;
+      backend?: unknown;
+    };
+    expect(options.local).toBe(true);
+    expect(options.session).toBe("agent:crestodian:main");
+    expect(options.historyLimit).toBe(200);
+    expect(options.config).toEqual({});
+    expect(options.title).toBe("openclaw crestodian");
+    if (!options.backend || typeof options.backend !== "object") {
+      throw new Error("expected crestodian TUI backend");
+    }
+  });
+
+  it("isolates event consumer failures during sendChat", async () => {
+    const backendWithEngine = await new Promise<{
+      backend: {
+        sendChat: (opts: { message: string }) => Promise<{ runId: string }>;
+        onEvent?: (evt: {
+          event: string;
+          payload?: { state?: string; errorMessage?: string };
+        }) => void;
+        engine: {
+          handle: () => Promise<{ text: string; action: "none" }>;
+          dispose: () => Promise<void>;
+        };
+      };
+      dispose: () => Promise<void>;
+    }>((resolve) => {
+      void runCrestodianTui(
+        {
+          deps: { loadOverview: async () => overview },
+          runTui: async (opts) => {
+            const backend = opts.backend as unknown as {
+              sendChat: (opts: { message: string }) => Promise<{ runId: string }>;
+              onEvent?: (evt: {
+                event: string;
+                payload?: { state?: string; errorMessage?: string };
+              }) => void;
+              engine: {
+                handle: () => Promise<{ text: string; action: "none" }>;
+                dispose: () => Promise<void>;
+              };
+              dispose: () => Promise<void>;
+            };
+            resolve({ backend, dispose: async () => backend.dispose() });
+            return { exitReason: "exit" };
+          },
+        },
+        createRuntime(),
+      );
     });
-    expect(runTuiOptions).toMatchObject({ backend: expect.any(Object) });
+
+    const { backend, dispose } = backendWithEngine;
+    backend.engine.handle = async () => ({ text: "hello", action: "none" });
+    backend.onEvent = () => {
+      throw new Error("simulated render failure");
+    };
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await backend.sendChat({ message: "hello" });
+      // Wait for the fire-and-forget response path to emit its final event.
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await dispose();
+    }
+
+    expect(unhandled).toHaveLength(0);
   });
 });

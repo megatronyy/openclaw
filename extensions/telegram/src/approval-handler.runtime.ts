@@ -1,3 +1,4 @@
+// Telegram plugin module implements approval handler behavior.
 import type {
   ChannelApprovalCapabilityHandlerContext,
   PendingApprovalView,
@@ -6,7 +7,7 @@ import { createChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/a
 import { buildChannelApprovalNativeTargetKey } from "openclaw/plugin-sdk/approval-native-runtime";
 import { buildPluginApprovalPendingReplyPayload } from "openclaw/plugin-sdk/approval-reply-runtime";
 import {
-  buildApprovalInteractiveReplyFromActionDescriptors,
+  buildApprovalPresentationFromActionDescriptors,
   buildExecApprovalPendingReplyPayload,
 } from "openclaw/plugin-sdk/approval-reply-runtime";
 import type { ExecApprovalPendingReplyParams } from "openclaw/plugin-sdk/approval-reply-runtime";
@@ -35,14 +36,14 @@ type TelegramPendingDelivery = {
   buttons: ReturnType<typeof resolveTelegramInlineButtons>;
 };
 
-export type TelegramExecApprovalHandlerDeps = {
+type TelegramExecApprovalHandlerDeps = {
   nowMs?: () => number;
   sendTyping?: typeof sendTypingTelegram;
   sendMessage?: typeof sendMessageTelegram;
   editReplyMarkup?: typeof editMessageReplyMarkupTelegram;
 };
 
-export type TelegramApprovalHandlerContext = {
+type TelegramApprovalHandlerContext = {
   token: string;
   deps?: TelegramExecApprovalHandlerDeps;
 };
@@ -92,7 +93,7 @@ function buildPendingPayload(params: {
   return {
     text: payload.text ?? "",
     buttons: resolveTelegramInlineButtons({
-      interactive: buildApprovalInteractiveReplyFromActionDescriptors(params.view.actions),
+      presentation: buildApprovalPresentationFromActionDescriptors(params.view.actions),
     }),
   };
 }

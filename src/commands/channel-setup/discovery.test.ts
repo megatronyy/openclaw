@@ -1,3 +1,4 @@
+// Channel setup discovery tests cover visible setup choices from bundled, installed, and trusted catalog sources.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginAutoEnableResult } from "../../config/plugin-auto-enable.js";
 
@@ -30,6 +31,7 @@ vi.mock("../../config/plugin-auto-enable.js", () => ({
 
 vi.mock("../../channels/plugins/catalog.js", () => ({
   listChannelPluginCatalogEntries: (_args?: unknown) => listChannelPluginCatalogEntries(),
+  listRawChannelPluginCatalogEntries: (_args?: unknown) => listChannelPluginCatalogEntries(),
 }));
 
 vi.mock("../../channels/chat-meta.js", () => ({
@@ -159,15 +161,23 @@ describe("listManifestInstalledChannelIds", () => {
       env: { OPENCLAW_HOME: "/tmp/home" } as NodeJS.ProcessEnv,
     });
 
-    expect(resolved.entries).toHaveLength(1);
-    const entry = resolved.entries[0];
-    if (!entry) {
-      throw new Error("expected telegram setup entry");
-    }
-    expect(entry.id).toBe("telegram");
-    expect(entry.meta.label).toBe("Telegram");
-    expect(entry.meta.selectionLabel).toBe("Telegram");
-    expect(entry.meta.blurb).toBe("bot token");
-    expect(entry.meta.docsPath).toBe("/channels/telegram");
+    expect(resolved).toStrictEqual({
+      entries: [
+        {
+          id: "telegram",
+          meta: {
+            id: "telegram",
+            label: "Telegram",
+            selectionLabel: "Telegram",
+            blurb: "bot token",
+            docsPath: "/channels/telegram",
+          },
+        },
+      ],
+      installedCatalogEntries: [],
+      installableCatalogEntries: [],
+      installedCatalogById: new Map(),
+      installableCatalogById: new Map(),
+    });
   });
 });

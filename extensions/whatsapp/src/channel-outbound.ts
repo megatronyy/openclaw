@@ -1,8 +1,9 @@
+// Whatsapp plugin module implements channel outbound behavior.
 import {
   createMessageReceiptFromOutboundResults,
   defineChannelMessageAdapter,
   type ChannelMessageSendResult,
-} from "openclaw/plugin-sdk/channel-message";
+} from "openclaw/plugin-sdk/channel-outbound";
 import { chunkText } from "openclaw/plugin-sdk/reply-chunking";
 import { createWhatsAppOutboundBase } from "./outbound-base.js";
 import { normalizeWhatsAppPayloadTextPreservingIndentation } from "./outbound-media-contract.js";
@@ -76,12 +77,16 @@ export const whatsappMessageAdapter = defineChannelMessageAdapter({
     },
   },
   send: {
-    text: async (ctx) =>
-      toWhatsAppMessageSendResult(
-        await whatsappChannelOutbound.sendText!({
-          ...ctx,
-        }),
-        ctx.replyToId,
-      ),
+    text: async ({ onDeliveryResult, ...ctx }) => {
+      const result = await whatsappChannelOutbound.sendText!({
+        ...ctx,
+        onDeliveryResult: onDeliveryResult
+          ? async (progress) => {
+              await onDeliveryResult(toWhatsAppMessageSendResult(progress, ctx.replyToId));
+            }
+          : undefined,
+      });
+      return toWhatsAppMessageSendResult(result, ctx.replyToId);
+    },
   },
 });

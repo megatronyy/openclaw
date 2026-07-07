@@ -1,3 +1,4 @@
+// Matrix tests cover direct management plugin behavior.
 import { describe, expect, it, vi } from "vitest";
 import {
   inspectMatrixDirectRooms,
@@ -27,7 +28,7 @@ function expectDirectMappingWrite(
   roomIds: string[],
 ) {
   expect(setAccountData).toHaveBeenCalledTimes(1);
-  const [eventType, content] = setAccountData.mock.calls[0] ?? [];
+  const [eventType, content] = setAccountData.mock.calls.at(0) ?? [];
   expect(eventType).toBe(EventType.Direct);
   expect((content as Record<string, string[]> | undefined)?.[remoteUserId]).toEqual(roomIds);
 }

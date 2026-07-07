@@ -1,3 +1,4 @@
+// Google tests cover provider models plugin behavior.
 import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
 import { describe, expect, it } from "vitest";
 import { createProviderDynamicModelContext as createContext } from "../test-support/provider-model-test-helpers.js";
@@ -30,7 +31,6 @@ function expectModelFields(
   model: ProviderRuntimeModel | undefined,
   fields: Partial<ProviderRuntimeModel>,
 ) {
-  expect(model).toBeDefined();
   if (!model) {
     throw new Error("expected provider model");
   }
@@ -65,7 +65,7 @@ describe("resolveGoogleGeminiForwardCompatModel", () => {
         provider: "google-gemini-cli",
         modelId: "gemini-2.5-flash-lite",
         models: [
-          createTemplateModel("google-gemini-cli", "gemini-3.1-flash-lite-preview", {
+          createTemplateModel("google-gemini-cli", "gemini-3.1-flash-lite", {
             contextWindow: 1_048_576,
             api: "google-gemini-cli",
             baseUrl: "https://cloudcode-pa.googleapis.com",
@@ -114,6 +114,24 @@ describe("resolveGoogleGeminiForwardCompatModel", () => {
     expectModelFields(model, {
       provider: "google",
       id: "gemini-3.1-pro-preview",
+      api: "google-generative-ai",
+      reasoning: true,
+    });
+  });
+
+  it("canonicalizes provider-qualified retired Gemini 3 Pro preview requests", () => {
+    const model = resolveGoogleGeminiForwardCompatModel({
+      providerId: "google",
+      ctx: createContext({
+        provider: "google",
+        modelId: "google/gemini-3-pro-preview",
+        models: [createTemplateModel("google", "gemini-3.1-pro-preview")],
+      }),
+    });
+
+    expectModelFields(model, {
+      provider: "google",
+      id: "google/gemini-3.1-pro-preview",
       api: "google-generative-ai",
       reasoning: true,
     });
@@ -269,7 +287,7 @@ describe("resolveGoogleGeminiForwardCompatModel", () => {
     const models = [
       createTemplateModel("google", "gemini-3-pro-preview", { reasoning: true }),
       createTemplateModel("google", "gemini-3-flash-preview", { reasoning: true }),
-      createTemplateModel("google", "gemini-3.1-flash-lite-preview", { reasoning: true }),
+      createTemplateModel("google", "gemini-3.1-flash-lite", { reasoning: true }),
     ];
 
     expectModelFields(
@@ -392,13 +410,13 @@ describe("resolveGoogleGeminiForwardCompatModel", () => {
         providerId: "google-antigravity",
         ctx: createContext({
           provider: "google-antigravity",
-          modelId: "gemini-3.1-flash-lite-preview",
+          modelId: "gemini-3.1-flash-lite",
           models,
         }),
       }),
       {
         provider: "google-antigravity",
-        id: "gemini-3.1-flash-lite-preview",
+        id: "gemini-3.1-flash-lite",
         api: "openai-completions",
         contextWindow: 1_048_576,
       },
@@ -423,12 +441,12 @@ describe("resolveGoogleGeminiForwardCompatModel", () => {
       providerId: "google-vertex",
       ctx: createContext({
         provider: "google-vertex",
-        modelId: "gemini-3.1-flash-lite-preview",
+        modelId: "gemini-3.1-flash-lite",
         models: [
           createTemplateModel("google-gemini-cli", "gemini-3-flash-preview", {
             contextWindow: 128_000,
           }),
-          createTemplateModel("google-gemini-cli", "gemini-3.1-flash-lite-preview", {
+          createTemplateModel("google-gemini-cli", "gemini-3.1-flash-lite", {
             contextWindow: 1_048_576,
           }),
         ],
@@ -437,7 +455,7 @@ describe("resolveGoogleGeminiForwardCompatModel", () => {
 
     expectModelFields(model, {
       provider: "google-vertex",
-      id: "gemini-3.1-flash-lite-preview",
+      id: "gemini-3.1-flash-lite",
       contextWindow: 1_048_576,
       reasoning: false,
     });
@@ -473,6 +491,24 @@ describe("resolveGoogleGeminiForwardCompatModel", () => {
     expectModelFields(model, {
       provider: "google",
       id: "gemma-4-26b-a4b-it",
+      reasoning: true,
+    });
+  });
+
+  it("canonicalizes Gemma 4 26B shorthand before cloning templates", () => {
+    const model = resolveGoogleGeminiForwardCompatModel({
+      providerId: "google",
+      ctx: createContext({
+        provider: "google",
+        modelId: "gemma-4-26b",
+        models: [createTemplateModel("google", "gemini-3-flash-preview", { reasoning: false })],
+      }),
+    });
+
+    expectModelFields(model, {
+      provider: "google",
+      id: "gemma-4-26b-a4b-it",
+      api: "google-generative-ai",
       reasoning: true,
     });
   });

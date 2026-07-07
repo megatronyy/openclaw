@@ -1,6 +1,8 @@
+/** Tests dynamic provider env-var discovery from plugin metadata. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { sanitizeEnvVars } from "../agents/sandbox/sanitize-env-vars.js";
 import {
-  __testing,
+  testing,
   getProviderEnvVars,
   listKnownProviderAuthEnvVarNames,
   listKnownSecretEnvVarNames,
@@ -8,16 +10,22 @@ import {
   PROVIDER_ENV_VARS,
   resolveProviderAuthEnvVarCandidates,
   resolveProviderAuthEvidence,
+  resolveProviderAuthLookupMaps,
 } from "./provider-env-vars.js";
 
 type MockManifestRegistry = {
   plugins: Array<{
     id: string;
     origin: string;
+    enabled?: boolean;
+    enabledByDefault?: boolean;
     kind?: "memory" | "context-engine" | Array<"memory" | "context-engine">;
+    providers?: string[];
     providerAuthEnvVars?: Record<string, string[]>;
+    providerUsageAuthEnvVars?: Record<string, string[]>;
     providerAuthAliases?: Record<string, string>;
     setup?: {
+      requiresRuntime?: boolean;
       providers?: Array<{
         id: string;
         envVars?: string[];
@@ -53,8 +61,8 @@ const pluginRegistryMocks = vi.hoisted(() => {
           plugins: registry.plugins.map((plugin) => ({
             pluginId: plugin.id,
             origin: plugin.origin,
-            enabled: true,
-            enabledByDefault: true,
+            enabled: plugin.enabled ?? true,
+            enabledByDefault: plugin.enabledByDefault ?? true,
           })),
         },
         plugins: registry.plugins,
@@ -64,7 +72,8 @@ const pluginRegistryMocks = vi.hoisted(() => {
 });
 
 function requireLastMetadataSnapshotCall(): unknown[] {
-  const call = pluginRegistryMocks.loadPluginMetadataSnapshot.mock.calls.at(-1);
+  const calls = pluginRegistryMocks.loadPluginMetadataSnapshot.mock.calls;
+  const call = calls[calls.length - 1];
   if (!call) {
     throw new Error("expected plugin metadata snapshot call");
   }
@@ -102,7 +111,7 @@ describe("provider env vars dynamic manifest metadata", () => {
     pluginRegistryMocks.getCurrentPluginMetadataSnapshot.mockReset();
     pluginRegistryMocks.getCurrentPluginMetadataSnapshot.mockReturnValue(undefined);
     pluginRegistryMocks.loadPluginMetadataSnapshot.mockClear();
-    __testing.resetProviderEnvVarCachesForTests();
+    testing.resetProviderEnvVarCachesForTests();
   });
 
   it("includes later-installed plugin env vars without a bundled generated map", () => {
@@ -126,6 +135,90 @@ describe("provider env vars dynamic manifest metadata", () => {
     expect(getProviderEnvVars("fireworks-plan")).toEqual(["FIREWORKS_ALT_API_KEY"]);
     expect(listKnownProviderAuthEnvVarNames()).toContain("FIREWORKS_ALT_API_KEY");
     expect(listKnownSecretEnvVarNames()).toContain("FIREWORKS_ALT_API_KEY");
+  });
+
+  it("scrubs provider usage credentials without making them inference auth candidates", () => {
+    pluginRegistryMocks.loadPluginManifestRegistryForInstalledIndex.mockReturnValue({
+      plugins: [
+        {
+          id: "provider-billing",
+          origin: "global",
+          providers: ["provider-billing"],
+          providerUsageAuthEnvVars: {
+            "provider-billing": ["PROVIDER_BILLING_CREDENTIAL"],
+          },
+        },
+      ],
+      diagnostics: [],
+    });
+
+    expect(listKnownProviderAuthEnvVarNames()).toContain("PROVIDER_BILLING_CREDENTIAL");
+    expect(listKnownSecretEnvVarNames()).toContain("PROVIDER_BILLING_CREDENTIAL");
+    expect(resolveProviderAuthEnvVarCandidates()["provider-billing"]).toBeUndefined();
+    expect(getProviderEnvVars("provider-billing")).toStrictEqual([]);
+    expect(
+      sanitizeEnvVars({ PROVIDER_BILLING_CREDENTIAL: "billing-secret", SAFE_VALUE: "ok" }),
+    ).toMatchObject({
+      allowed: { SAFE_VALUE: "ok" },
+      blocked: ["PROVIDER_BILLING_CREDENTIAL"],
+    });
+  });
+
+  it("scrubs usage credentials from the active configured plugin snapshot", () => {
+    pluginRegistryMocks.getCurrentPluginMetadataSnapshot.mockReturnValue({
+      workspaceDir: "/workspace",
+      index: {
+        plugins: [
+          {
+            pluginId: "configured-billing",
+            origin: "workspace",
+            enabled: true,
+            enabledByDefault: true,
+          },
+          {
+            pluginId: "disabled-workspace",
+            origin: "workspace",
+            enabled: false,
+            enabledByDefault: false,
+          },
+        ],
+      },
+      plugins: [
+        {
+          id: "configured-billing",
+          origin: "workspace",
+          providerUsageAuthEnvVars: {
+            "configured-billing": ["CONFIGURED_BILLING_CREDENTIAL"],
+          },
+        },
+        {
+          id: "disabled-workspace",
+          origin: "workspace",
+          providerUsageAuthEnvVars: {
+            "disabled-workspace": ["PATH"],
+          },
+        },
+      ],
+    });
+
+    expect(
+      sanitizeEnvVars({
+        CONFIGURED_BILLING_CREDENTIAL: "billing-secret",
+        PATH: "/usr/bin",
+        SAFE_VALUE: "ok",
+      }),
+    ).toMatchObject({
+      allowed: { PATH: "/usr/bin", SAFE_VALUE: "ok" },
+      blocked: ["CONFIGURED_BILLING_CREDENTIAL"],
+    });
+    expect(pluginRegistryMocks.loadPluginMetadataSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("lets openai bootstrap from Codex app-server API-key env", () => {
+    expect(resolveProviderAuthEnvVarCandidates()["openai"]).toEqual([
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
+    ]);
   });
 
   it("includes setup provider env vars without loading setup runtime", () => {
@@ -589,5 +682,151 @@ describe("provider env vars dynamic manifest metadata", () => {
         includeUntrustedWorkspacePlugins: false,
       }),
     ).toEqual(["WHISPERX_API_KEY"]);
+  });
+
+  it("only loads plugin metadata snapshot once when resolving env var candidates, avoiding duplicate snapshot loads", () => {
+    pluginRegistryMocks.loadPluginManifestRegistryForInstalledIndex.mockReturnValue({
+      plugins: [
+        {
+          id: "external-fireworks",
+          origin: "global",
+          providerAuthEnvVars: {
+            fireworks: ["FIREWORKS_ALT_API_KEY"],
+          },
+          providerAuthAliases: {
+            "fireworks-plan": "fireworks",
+          },
+        },
+      ],
+      diagnostics: [],
+    });
+
+    pluginRegistryMocks.loadPluginMetadataSnapshot.mockClear();
+
+    resolveProviderAuthEnvVarCandidates({ config: {} });
+
+    // Verify it was only called once, proving alias resolution reused the snapshot and did not perform a second cold load!
+    expect(pluginRegistryMocks.loadPluginMetadataSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves alias, env, and evidence lookup maps from one metadata snapshot", () => {
+    pluginRegistryMocks.loadPluginManifestRegistryForInstalledIndex.mockReturnValue({
+      plugins: [
+        {
+          id: "external-fireworks",
+          origin: "global",
+          providerAuthEnvVars: {
+            fireworks: ["FIREWORKS_ALT_API_KEY"],
+          },
+          providerAuthAliases: {
+            "fireworks-plan": "fireworks",
+          },
+          setup: {
+            providers: [
+              {
+                id: "fireworks",
+                authEvidence: [
+                  {
+                    type: "local-file-with-env",
+                    fileEnvVar: "FIREWORKS_CREDENTIALS",
+                    credentialMarker: "fireworks-local-credentials",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        {
+          id: "legacy-setup-owner",
+          origin: "global",
+          providers: ["legacy-cloud"],
+          providerAuthAliases: {
+            "legacy-cloud-plan": "legacy-cloud",
+          },
+        },
+      ],
+      diagnostics: [],
+    });
+
+    const lookupMaps = resolveProviderAuthLookupMaps({ config: {} });
+
+    expect(lookupMaps.aliasMap["fireworks-plan"]).toBe("fireworks");
+    expect(lookupMaps.envCandidateMap["fireworks-plan"]).toEqual(["FIREWORKS_ALT_API_KEY"]);
+    expect(lookupMaps.authEvidenceMap["fireworks-plan"]).toEqual([
+      {
+        type: "local-file-with-env",
+        fileEnvVar: "FIREWORKS_CREDENTIALS",
+        credentialMarker: "fireworks-local-credentials",
+      },
+    ]);
+    expect(lookupMaps.setupProviderFallbackRefs).toEqual([
+      "fireworks",
+      "fireworks-plan",
+      "legacy-cloud",
+      "legacy-cloud-plan",
+    ]);
+    expect(pluginRegistryMocks.loadPluginMetadataSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("excludes disabled plugin setup fallback refs from runtime auth lookup maps", () => {
+    pluginRegistryMocks.loadPluginManifestRegistryForInstalledIndex.mockReturnValue({
+      plugins: [
+        {
+          id: "disabled-setup-owner",
+          origin: "global",
+          enabled: false,
+          providers: ["disabled-cloud"],
+          providerAuthAliases: {
+            "disabled-cloud-plan": "disabled-cloud",
+          },
+        },
+      ],
+      diagnostics: [],
+    });
+
+    const lookupMaps = resolveProviderAuthLookupMaps({ config: {} });
+
+    expect(lookupMaps.setupProviderFallbackRefs).toEqual([]);
+    expect(pluginRegistryMocks.loadPluginMetadataSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reuse a load-path current snapshot for default provider env lookups without parameters", () => {
+    const staleSnapshot = {
+      index: {
+        plugins: [
+          {
+            pluginId: "load-path-provider",
+            origin: "global",
+            enabled: true,
+            enabledByDefault: true,
+          },
+        ],
+      },
+      plugins: [
+        {
+          id: "load-path-provider",
+          origin: "global",
+          providerAuthEnvVars: {
+            "load-path-provider": ["LOAD_PATH_PROVIDER_API_KEY"],
+          },
+        },
+      ],
+    };
+    pluginRegistryMocks.getCurrentPluginMetadataSnapshot.mockImplementation(
+      (params: { config?: unknown; requireDefaultDiscoveryContext?: boolean }) => {
+        if (params.config || params.requireDefaultDiscoveryContext) {
+          return undefined;
+        }
+        return staleSnapshot;
+      },
+    );
+
+    expect(resolveProviderAuthEnvVarCandidates()["load-path-provider"]).toBeUndefined();
+    expect(pluginRegistryMocks.getCurrentPluginMetadataSnapshot).toHaveBeenCalledWith({
+      env: process.env,
+      allowWorkspaceScopedSnapshot: true,
+      requireDefaultDiscoveryContext: true,
+    });
+    expect(pluginRegistryMocks.loadPluginMetadataSnapshot).toHaveBeenCalled();
   });
 });

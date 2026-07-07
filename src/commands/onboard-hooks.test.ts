@@ -1,9 +1,10 @@
+// Onboard hooks tests cover hook setup status, runtime output, and config mutation behavior.
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import type { HookStatusEntry, HookStatusReport } from "../hooks/hooks-status.js";
 import type { RuntimeEnv } from "../runtime.js";
 import type { WizardPrompter } from "../wizard/prompts.js";
-import { setupInternalHooks } from "./onboard-hooks.js";
+import { enableDefaultOnboardingInternalHooks, setupInternalHooks } from "./onboard-hooks.js";
 
 // Mock hook discovery modules
 vi.mock("../hooks/hooks-status.js", () => ({
@@ -18,6 +19,63 @@ vi.mock("../agents/agent-scope.js", () => ({
 describe("onboard-hooks", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.OPENCLAW_LOCALE;
+  });
+
+  describe("enableDefaultOnboardingInternalHooks", () => {
+    it("enables only the bundled session-memory entry by default", () => {
+      const result = enableDefaultOnboardingInternalHooks({});
+
+      expect(result.hooks?.internal?.enabled).toBeUndefined();
+      expect(result.hooks?.internal?.entries).toEqual({
+        "session-memory": { enabled: true },
+      });
+    });
+
+    it("preserves explicit internal hook disablement", () => {
+      const cfg: OpenClawConfig = {
+        hooks: {
+          internal: {
+            enabled: false,
+          },
+        },
+      };
+
+      expect(enableDefaultOnboardingInternalHooks(cfg)).toBe(cfg);
+    });
+
+    it("preserves an explicit session-memory disablement", () => {
+      const cfg: OpenClawConfig = {
+        hooks: {
+          internal: {
+            entries: {
+              "session-memory": { enabled: false },
+            },
+          },
+        },
+      };
+
+      expect(enableDefaultOnboardingInternalHooks(cfg)).toBe(cfg);
+    });
+
+    it("preserves existing per-hook settings when enabling session-memory", () => {
+      const result = enableDefaultOnboardingInternalHooks({
+        hooks: {
+          internal: {
+            entries: {
+              "session-memory": {
+                messages: 25,
+              },
+            },
+          },
+        },
+      });
+
+      expect(result.hooks?.internal?.entries?.["session-memory"]).toEqual({
+        enabled: true,
+        messages: 25,
+      });
+    });
   });
 
   const createMockPrompter = (multiselectValue: string[]): WizardPrompter => ({
@@ -57,6 +115,7 @@ describe("onboard-hooks", () => {
       ? undefined
       : "missing requirements") as HookStatusEntry["blockedReason"],
     ...params,
+    unknownEvents: [],
     source: "openclaw-bundled" as const,
     pluginId: undefined,
     homepage: undefined,
@@ -134,6 +193,10 @@ describe("onboard-hooks", () => {
   }
 
   describe("setupInternalHooks", () => {
+    beforeEach(() => {
+      vi.unstubAllEnvs();
+    });
+
     it("should enable hooks when user selects them", async () => {
       const { result, prompter } = await runSetupInternalHooks({
         selected: ["session-memory"],
@@ -160,6 +223,20 @@ describe("onboard-hooks", () => {
           },
         ],
       });
+    });
+
+    it("localizes built-in hook prompts when OPENCLAW_LOCALE is set", async () => {
+      process.env.OPENCLAW_LOCALE = "zh-CN";
+      const { prompter } = await runSetupInternalHooks({
+        selected: ["__skip__"],
+      });
+
+      expect(prompter.multiselect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "启用 hooks？",
+          options: expect.arrayContaining([{ value: "__skip__", label: "暂时跳过" }]),
+        }),
+      );
     });
 
     it("should not enable hooks when user skips", async () => {
@@ -221,20 +298,35 @@ describe("onboard-hooks", () => {
     });
 
     it("should show informative notes to user", async () => {
+      vi.stubEnv("OPENCLAW_CONTAINER_HINT", "");
+      vi.stubEnv("OPENCLAW_PROFILE", "");
       const { prompter } = await runSetupInternalHooks({
         selected: ["session-memory"],
       });
 
       const noteCalls = (prompter.note as ReturnType<typeof vi.fn>).mock.calls;
-      expect(noteCalls).toHaveLength(2);
-
-      // First note should explain what hooks are
-      expect(noteCalls[0][0]).toContain("Hooks let you automate actions");
-      expect(noteCalls[0][0]).toContain("automate actions");
-
-      // Second note should confirm configuration
-      expect(noteCalls[1][0]).toContain("Enabled 1 hook: session-memory");
-      expect(noteCalls[1][0]).toMatch(/(?:openclaw|openclaw)( --profile isolated)? hooks list/);
+      expect(noteCalls).toEqual([
+        [
+          [
+            "Hooks let you automate actions when agent commands are issued.",
+            "Example: Save session context to memory when you issue /new or /reset.",
+            "",
+            "Learn more: https://docs.openclaw.ai/automation/hooks",
+          ].join("\n"),
+          "Hooks",
+        ],
+        [
+          [
+            "Enabled 1 hook: session-memory",
+            "",
+            "You can manage hooks later with:",
+            "  openclaw hooks list",
+            "  openclaw hooks enable <name>",
+            "  openclaw hooks disable <name>",
+          ].join("\n"),
+          "Hooks Configured",
+        ],
+      ]);
     });
   });
 });

@@ -1,3 +1,4 @@
+// Qa Matrix plugin module implements scenario runtime behavior.
 import {
   MATRIX_QA_DRIVER_DM_ROOM_KEY,
   MATRIX_QA_SECONDARY_ROOM_KEY,
@@ -21,11 +22,6 @@ import {
   runApprovalPluginMetadataSingleEventScenario,
   runApprovalThreadTargetScenario,
 } from "./scenario-runtime-approval.js";
-import {
-  runDmPerRoomSessionOverrideScenario,
-  runDmSharedSessionNoticeScenario,
-  runDmThreadReplyOverrideScenario,
-} from "./scenario-runtime-dm.js";
 import {
   runMatrixQaE2eeCorruptCryptoIdbSnapshotScenario,
   runMatrixQaE2eeHistoryExistsBackupEmptyScenario,
@@ -61,6 +57,7 @@ import {
   runMatrixQaE2eeRecoveryKeyLifecycleScenario,
   runMatrixQaE2eeRecoveryOwnerVerificationRequiredScenario,
   runMatrixQaE2eeRestartResumeScenario,
+  runMatrixQaE2eeStateAfterMissingEncryptionScenario,
   runMatrixQaE2eeStaleDeviceHygieneScenario,
   runMatrixQaE2eeThreadFollowUpScenario,
   runMatrixQaE2eeVerificationNoticeNoTriggerScenario,
@@ -75,6 +72,7 @@ import {
   runImageUnderstandingAttachmentScenario,
   runMediaTypeCoverageScenario,
   runUnsupportedMediaSafeScenario,
+  runVoicePreflightMentionScenario,
 } from "./scenario-runtime-media.js";
 import {
   runReactionNotAReplyScenario,
@@ -84,13 +82,9 @@ import {
 import {
   runHomeserverRestartResumeScenario,
   runInitialCatchupThenIncrementalScenario,
-  runPostRestartRoomContinueScenario,
-  runRestartReplayDedupeScenario,
-  runRestartResumeScenario,
   runStaleSyncReplayDedupeScenario,
 } from "./scenario-runtime-restart.js";
 import {
-  runAllowlistHotReloadScenario,
   runBlockStreamingScenario,
   runMatrixQaCanary,
   runMembershipLossScenario,
@@ -99,13 +93,10 @@ import {
   runQuietStreamingPreviewScenario,
   runReactionThreadedScenario,
   runRoomAutoJoinInviteScenario,
-  runRoomThreadReplyOverrideScenario,
-  runSubagentThreadSpawnScenario,
-  runThreadFollowUpScenario,
-  runThreadIsolationScenario,
   runThreadNestedReplyShapeScenario,
   runThreadRootPreservationScenario,
   runToolProgressErrorScenario,
+  runToolProgressCommandPreviewScenario,
   runToolProgressMentionSafetyScenario,
   runToolProgressPreviewOptOutScenario,
   runToolProgressPreviewScenario,
@@ -212,26 +203,20 @@ export async function runMatrixQaScenario(
   context: MatrixQaScenarioContext,
 ): Promise<MatrixQaScenarioExecution> {
   switch (scenario.id) {
-    case "matrix-thread-follow-up":
-      return await runThreadFollowUpScenario(context);
     case "matrix-thread-root-preservation":
       return await runThreadRootPreservationScenario(context);
     case "matrix-thread-nested-reply-shape":
       return await runThreadNestedReplyShapeScenario(context);
-    case "matrix-thread-isolation":
-      return await runThreadIsolationScenario(context);
-    case "matrix-subagent-thread-spawn":
-      return await runSubagentThreadSpawnScenario(context);
     case "matrix-top-level-reply-shape":
       return await runTopLevelReplyShapeScenario(context);
-    case "matrix-room-thread-reply-override":
-      return await runRoomThreadReplyOverrideScenario(context);
     case "matrix-room-partial-streaming-preview":
       return await runPartialStreamingPreviewScenario(context);
     case "matrix-room-quiet-streaming-preview":
       return await runQuietStreamingPreviewScenario(context);
     case "matrix-room-tool-progress-preview":
       return await runToolProgressPreviewScenario(context);
+    case "matrix-room-tool-progress-command-preview":
+      return await runToolProgressCommandPreviewScenario(context);
     case "matrix-room-tool-progress-preview-opt-out":
       return await runToolProgressPreviewOptOutScenario(context);
     case "matrix-room-tool-progress-error":
@@ -246,6 +231,8 @@ export async function runMatrixQaScenario(
       return await runGeneratedImageDeliveryScenario(context);
     case "matrix-media-type-coverage":
       return await runMediaTypeCoverageScenario(context);
+    case "matrix-voice-preflight-mention":
+      return await runVoicePreflightMentionScenario(context);
     case "matrix-attachment-only-ignored":
       return await runAttachmentOnlyIgnoredScenario(context);
     case "matrix-unsupported-media-safe":
@@ -257,12 +244,6 @@ export async function runMatrixQaScenario(
         tokenPrefix: "MATRIX_QA_DM",
         withMention: false,
       });
-    case "matrix-dm-shared-session-notice":
-      return await runDmSharedSessionNoticeScenario(context);
-    case "matrix-dm-thread-reply-override":
-      return await runDmThreadReplyOverrideScenario(context);
-    case "matrix-dm-per-room-session-override":
-      return await runDmPerRoomSessionOverrideScenario(context);
     case "matrix-room-autojoin-invite":
       return await runRoomAutoJoinInviteScenario(context);
     case "matrix-secondary-room-reply":
@@ -298,14 +279,8 @@ export async function runMatrixQaScenario(
       return await runApprovalThreadTargetScenario(context);
     case "matrix-approval-channel-target-both":
       return await runApprovalChannelTargetBothScenario(context);
-    case "matrix-restart-resume":
-      return await runRestartResumeScenario(context);
-    case "matrix-post-restart-room-continue":
-      return await runPostRestartRoomContinueScenario(context);
     case "matrix-initial-catchup-then-incremental":
       return await runInitialCatchupThenIncrementalScenario(context);
-    case "matrix-restart-replay-dedupe":
-      return await runRestartReplayDedupeScenario(context);
     case "matrix-stale-sync-replay-dedupe":
       return await runStaleSyncReplayDedupeScenario(context);
     case "matrix-room-membership-loss":
@@ -377,8 +352,6 @@ export async function runMatrixQaScenario(
         token,
       });
     }
-    case "matrix-allowlist-hot-reload":
-      return await runAllowlistHotReloadScenario(context);
     case "matrix-multi-actor-ordering":
       return await runMultiActorOrderingScenario(context);
     case "matrix-inbound-edit-ignored":
@@ -387,6 +360,8 @@ export async function runMatrixQaScenario(
       return await runInboundEditNoDuplicateTriggerScenario(context);
     case "matrix-e2ee-basic-reply":
       return await runMatrixQaE2eeBasicReplyScenario(context);
+    case "matrix-e2ee-state-after-missing-encryption":
+      return await runMatrixQaE2eeStateAfterMissingEncryptionScenario(context);
     case "matrix-e2ee-thread-follow-up":
       return await runMatrixQaE2eeThreadFollowUpScenario(context);
     case "matrix-e2ee-bootstrap-success":

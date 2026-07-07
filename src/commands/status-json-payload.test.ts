@@ -1,3 +1,4 @@
+// Status JSON payload tests cover update metadata, overview rows, and structured status output.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VERSION } from "../version.js";
 import { resolveStatusUpdateChannelInfo } from "./status-all/format.js";
@@ -209,11 +210,10 @@ describe("status-json-payload", () => {
       secretDiagnostics: [],
     });
 
-    expect(payload.gateway).toMatchObject({
-      modelPricing: {
-        state: "degraded",
-        detail: "OpenRouter pricing fetch failed: TypeError: fetch failed",
-      },
-    });
+    const modelPricing = payload.gateway.modelPricing as
+      | { state?: string; detail?: string }
+      | undefined;
+    expect(modelPricing?.state).toBe("degraded");
+    expect(modelPricing?.detail).toBe("OpenRouter pricing fetch failed: TypeError: fetch failed");
   });
 });

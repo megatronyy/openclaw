@@ -5,8 +5,8 @@ import OpenClawProtocol
 enum OpenClawConfigFile {
     private static let logger = Logger(subsystem: "ai.openclaw", category: "config")
     private static let configAuditFileName = "config-audit.jsonl"
-    private static let configHealthFileName = "config-health.json"
     private static let fileLock = NSRecursiveLock()
+    private nonisolated(unsafe) static var configHealthState: [String: Any] = [:]
 
     private static func withFileLock<T>(_ body: () throws -> T) rethrows -> T {
         self.fileLock.lock()
@@ -301,6 +301,16 @@ enum OpenClawConfigFile {
         }
     }
 
+    static func setRemoteGatewayTransport(_ value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        self.updateGatewayDict { gateway in
+            var remote = gateway["remote"] as? [String: Any] ?? [:]
+            remote["transport"] = trimmed
+            gateway["remote"] = remote
+        }
+    }
+
     static func clearRemoteGatewayUrl() {
         self.updateGatewayDict { gateway in
             guard var remote = gateway["remote"] as? [String: Any] else { return }
@@ -467,39 +477,6 @@ enum OpenClawConfigFile {
             .appendingPathComponent(self.configAuditFileName, isDirectory: false)
     }
 
-    private static func configHealthStateURL() -> URL {
-        self.stateDirURL()
-            .appendingPathComponent("logs", isDirectory: true)
-            .appendingPathComponent(self.configHealthFileName, isDirectory: false)
-    }
-
-    private static func readConfigHealthState() -> [String: Any] {
-        let url = self.configHealthStateURL()
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            return [:]
-        }
-        return root
-    }
-
-    private static func writeConfigHealthState(_ root: [String: Any]) {
-        guard JSONSerialization.isValidJSONObject(root),
-              let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-        else {
-            return
-        }
-        let url = self.configHealthStateURL()
-        do {
-            try FileManager().createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
-            try data.write(to: url, options: [.atomic])
-        } catch {
-            // best-effort
-        }
-    }
-
     private static func configHealthEntry(state: [String: Any], configPath: String) -> [String: Any] {
         let entries = state["entries"] as? [String: Any]
         return entries?[configPath] as? [String: Any] ?? [:]
@@ -662,7 +639,7 @@ enum OpenClawConfigFile {
     private static func observeConfigRead(data: Data, root: [String: Any]?, configURL: URL, valid: Bool) {
         let observedAt = ISO8601DateFormatter().string(from: Date())
         let current = self.configFingerprint(data: data, root: root, configURL: configURL, observedAt: observedAt)
-        var state = self.readConfigHealthState()
+        var state = self.configHealthState
         let entry = self.configHealthEntry(state: state, configPath: configURL.path)
         let lastKnownGood = entry["lastKnownGood"] as? [String: Any]
         let suspicious = self.observeSuspiciousReasons(
@@ -678,7 +655,7 @@ enum OpenClawConfigFile {
             ]
             if !self.sameFingerprint(lastKnownGood, current) || entry["lastObservedSuspiciousSignature"] != nil {
                 state = self.setConfigHealthEntry(state: state, configPath: configURL.path, entry: nextEntry)
-                self.writeConfigHealthState(state)
+                self.configHealthState = state
             }
             return
         }
@@ -740,7 +717,7 @@ enum OpenClawConfigFile {
         var nextEntry = entry
         nextEntry["lastObservedSuspiciousSignature"] = signature
         state = self.setConfigHealthEntry(state: state, configPath: configURL.path, entry: nextEntry)
-        self.writeConfigHealthState(state)
+        self.configHealthState = state
     }
 
     private static func appendConfigWriteAudit(_ fields: [String: Any]) {

@@ -1,3 +1,4 @@
+// Mattermost tests cover setup plugin behavior.
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import {
   createSetupWizardAdapter,
@@ -212,11 +213,14 @@ describe("mattermost setup", () => {
           httpUrl: "https://chat.example.com",
         },
       } as never),
-    ).toMatchObject({
+    ).toEqual({
       channels: {
         mattermost: {
+          enabled: true,
           accounts: {
-            default: { name: "Legacy" },
+            default: {
+              name: "Legacy",
+            },
             "work-team": {
               enabled: true,
               name: "Work",

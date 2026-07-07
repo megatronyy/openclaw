@@ -1,3 +1,4 @@
+// Verifies plugin readonly-scope audit findings.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const applyPluginAutoEnableMock = vi.hoisted(() => vi.fn());
@@ -14,9 +15,13 @@ vi.mock("../plugins/channel-plugin-ids.js", () => ({
     resolveConfiguredChannelPluginIdsMock(...args),
 }));
 
-vi.mock("../plugins/runtime.js", () => ({
-  getActivePluginRegistry: (...args: unknown[]) => getActivePluginRegistryMock(...args),
-}));
+vi.mock("../plugins/runtime.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../plugins/runtime.js")>();
+  return {
+    ...actual,
+    getActivePluginRegistry: (...args: unknown[]) => getActivePluginRegistryMock(...args),
+  };
+});
 
 vi.mock("../plugins/runtime/metadata-registry-loader.js", () => ({
   loadPluginMetadataRegistrySnapshot: (...args: unknown[]) =>
@@ -45,6 +50,15 @@ function createAuditContext(params: {
     configSnapshot: null,
     codeSafetySummaryCache: new Map<string, Promise<unknown>>(),
   };
+}
+
+function requireFirstMockArg<T>(mock: { mock: { calls: T[][] } }, label: string): T {
+  const call = mock.mock.calls[0];
+  if (!call) {
+    throw new Error(`expected ${label} call`);
+  }
+  const [arg] = call;
+  return arg;
 }
 
 describe("security audit read-only plugin scope", () => {
@@ -88,24 +102,25 @@ describe("security audit read-only plugin scope", () => {
       }),
     );
 
-    const resolveConfiguredChannelPluginIdsParams = resolveConfiguredChannelPluginIdsMock.mock
-      .calls[0]?.[0] as
-      | {
-          config?: unknown;
-          activationSourceConfig?: unknown;
-          env?: unknown;
-        }
-      | undefined;
-    expect(resolveConfiguredChannelPluginIdsParams?.config).toBe(sourceConfig);
-    expect(resolveConfiguredChannelPluginIdsParams?.activationSourceConfig).toBe(sourceConfig);
-    expect(resolveConfiguredChannelPluginIdsParams?.env).toStrictEqual({});
+    const resolveConfiguredChannelPluginIdsParams = requireFirstMockArg(
+      resolveConfiguredChannelPluginIdsMock,
+      "configured channel plugin ids",
+    ) as {
+      config?: unknown;
+      activationSourceConfig?: unknown;
+      env?: unknown;
+    };
+    expect(resolveConfiguredChannelPluginIdsParams.config).toBe(sourceConfig);
+    expect(resolveConfiguredChannelPluginIdsParams.activationSourceConfig).toBe(sourceConfig);
+    expect(resolveConfiguredChannelPluginIdsParams.env).toStrictEqual({});
 
-    const loadSnapshotParams = loadPluginMetadataRegistrySnapshotMock.mock.calls[0]?.[0] as
-      | {
-          onlyPluginIds?: string[];
-        }
-      | undefined;
-    expect(loadSnapshotParams?.onlyPluginIds).toStrictEqual([
+    const loadSnapshotParams = requireFirstMockArg(
+      loadPluginMetadataRegistrySnapshotMock,
+      "plugin metadata registry snapshot",
+    ) as {
+      onlyPluginIds?: string[];
+    };
+    expect(loadSnapshotParams.onlyPluginIds).toStrictEqual([
       "external-channel-plugin",
       "audit-plugin",
     ]);
@@ -134,12 +149,13 @@ describe("security audit read-only plugin scope", () => {
       }),
     );
 
-    const loadSnapshotParams = loadPluginMetadataRegistrySnapshotMock.mock.calls[0]?.[0] as
-      | {
-          onlyPluginIds?: string[];
-        }
-      | undefined;
-    expect(loadSnapshotParams?.onlyPluginIds).toStrictEqual(["audit-plugin"]);
+    const loadSnapshotParams = requireFirstMockArg(
+      loadPluginMetadataRegistrySnapshotMock,
+      "plugin metadata registry snapshot",
+    ) as {
+      onlyPluginIds?: string[];
+    };
+    expect(loadSnapshotParams.onlyPluginIds).toStrictEqual(["audit-plugin"]);
   });
 
   it("skips plugin runtime and collector discovery when collector loading is disabled", async () => {

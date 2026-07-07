@@ -1,4 +1,5 @@
-import type { APIEmbed } from "discord-api-types/v10";
+// Discord plugin module implements send.message request behavior.
+import { MessageFlags, type APIAllowedMentions, type APIEmbed } from "discord-api-types/v10";
 import {
   Embed,
   serializePayload,
@@ -7,11 +8,13 @@ import {
   type TopLevelComponents,
 } from "./internal/discord.js";
 
-export const SUPPRESS_NOTIFICATIONS_FLAG = 1 << 12;
+export const SUPPRESS_EMBEDS_FLAG = MessageFlags.SuppressEmbeds;
+export const SUPPRESS_NOTIFICATIONS_FLAG = MessageFlags.SuppressNotifications;
 
 export type DiscordSendComponentFactory = (text: string) => TopLevelComponents[];
 export type DiscordSendComponents = TopLevelComponents[] | DiscordSendComponentFactory;
 export type DiscordSendEmbeds = Array<APIEmbed | Embed>;
+export type DiscordAllowedMentions = APIAllowedMentions;
 
 export function resolveDiscordSendComponents(params: {
   components?: DiscordSendComponents;
@@ -47,6 +50,7 @@ export function buildDiscordMessagePayload(params: {
   text: string;
   components?: TopLevelComponents[];
   embeds?: Embed[];
+  allowedMentions?: DiscordAllowedMentions;
   flags?: number;
   files?: MessagePayloadFile[];
 }): MessagePayloadObject {
@@ -62,6 +66,9 @@ export function buildDiscordMessagePayload(params: {
   if (!hasV2 && params.embeds?.length) {
     payload.embeds = params.embeds;
   }
+  if (params.allowedMentions) {
+    payload.allowed_mentions = params.allowedMentions;
+  }
   if (params.flags !== undefined) {
     payload.flags = params.flags;
   }
@@ -71,10 +78,25 @@ export function buildDiscordMessagePayload(params: {
   return payload;
 }
 
+export function resolveDiscordMessageFlags(params: {
+  silent?: boolean;
+  suppressEmbeds?: boolean;
+}): number | undefined {
+  let flags = 0;
+  if (params.suppressEmbeds) {
+    flags |= SUPPRESS_EMBEDS_FLAG;
+  }
+  if (params.silent) {
+    flags |= SUPPRESS_NOTIFICATIONS_FLAG;
+  }
+  return flags || undefined;
+}
+
 export function buildDiscordMessageRequest(params: {
   text: string;
   components?: TopLevelComponents[];
   embeds?: Embed[];
+  allowedMentions?: DiscordAllowedMentions;
   files?: MessagePayloadFile[];
   flags?: number;
   replyTo?: string;

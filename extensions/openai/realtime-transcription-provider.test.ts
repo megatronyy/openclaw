@@ -1,3 +1,4 @@
+// Openai tests cover realtime transcription provider plugin behavior.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildOpenAIRealtimeTranscriptionProvider } from "./realtime-transcription-provider.js";
 
@@ -83,14 +84,17 @@ function parseSent(socket: FakeWebSocketInstance): SentRealtimeEvent[] {
 }
 
 async function waitForFakeSocket(): Promise<FakeWebSocketInstance> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const socket = FakeWebSocket.instances[0];
-    if (socket) {
-      return socket;
+  let socket: FakeWebSocketInstance | undefined;
+  await vi.waitFor(() => {
+    socket = FakeWebSocket.instances[0];
+    if (!socket) {
+      throw new Error("expected session to create a websocket");
     }
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  if (!socket) {
+    throw new Error("expected session to create a websocket");
   }
-  throw new Error("expected session to create a websocket");
+  return socket;
 }
 
 function mockCallArg(mock: { mock: { calls: unknown[][] } }, index = 0): Record<string, unknown> {
@@ -176,6 +180,24 @@ describe("buildOpenAIRealtimeTranscriptionProvider", () => {
     expect(resolved?.vadThreshold).toBe(0);
   });
 
+  it("drops malformed VAD timing settings", () => {
+    const provider = buildOpenAIRealtimeTranscriptionProvider();
+    const resolved = provider.resolveConfig?.({
+      cfg: {} as never,
+      rawConfig: {
+        providers: {
+          openai: {
+            silenceDurationMs: -1,
+            vadThreshold: 1.5,
+          },
+        },
+      },
+    });
+
+    expect(resolved?.silenceDurationMs).toBeUndefined();
+    expect(resolved?.vadThreshold).toBeUndefined();
+  });
+
   it("accepts the legacy openai-realtime alias", () => {
     const provider = buildOpenAIRealtimeTranscriptionProvider();
     expect(provider.aliases).toContain("openai-realtime");
@@ -183,12 +205,12 @@ describe("buildOpenAIRealtimeTranscriptionProvider", () => {
 
   it("treats a Codex OAuth profile as configured when no API key is present", () => {
     const provider = buildOpenAIRealtimeTranscriptionProvider();
-    const cfg = { auth: { order: { "openai-codex": ["openai-codex:default"] } } };
+    const cfg = { auth: { order: { openai: ["openai:default"] } } };
     providerAuthMocks.isProviderAuthProfileConfigured.mockReturnValue(true);
 
     expect(provider.isConfigured({ cfg: cfg as never, providerConfig: {} })).toBe(true);
     expect(providerAuthMocks.isProviderAuthProfileConfigured).toHaveBeenCalledWith({
-      provider: "openai-codex",
+      provider: "openai",
       cfg,
     });
   });
@@ -201,7 +223,7 @@ describe("buildOpenAIRealtimeTranscriptionProvider", () => {
       response: new Response(JSON.stringify({ value: "ek-test" }), { status: 200 }),
       release,
     });
-    const cfg = { auth: { order: { "openai-codex": ["openai-codex:default"] } } };
+    const cfg = { auth: { order: { openai: ["openai:default"] } } };
     const session = provider.createSession({
       cfg: cfg as never,
       providerConfig: {},
@@ -212,7 +234,7 @@ describe("buildOpenAIRealtimeTranscriptionProvider", () => {
 
     expect(socket.headers?.Authorization).toBe("Bearer ek-test");
     expect(providerAuthMocks.resolveProviderAuthProfileApiKey).toHaveBeenCalledWith({
-      provider: "openai-codex",
+      provider: "openai",
       cfg,
     });
     const request = mockCallArg(ssrfMocks.fetchWithSsrFGuard);

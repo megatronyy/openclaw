@@ -1,12 +1,13 @@
+// Whatsapp plugin module implements session behavior.
 import { randomUUID } from "node:crypto";
-import fsSync from "node:fs";
 import type { Agent } from "node:https";
-import { HttpsProxyAgent } from "https-proxy-agent";
+import type { GroupMetadata, WAMessageKey, proto } from "baileys";
 import { formatCliCommand } from "openclaw/plugin-sdk/cli-runtime";
 import { VERSION } from "openclaw/plugin-sdk/cli-runtime";
 import {
-  resolveEnvHttpProxyUrl,
-  shouldUseEnvHttpProxyForUrl,
+  createHttp1EnvHttpProxyAgent,
+  createHttp1ProxyAgent,
+  createNodeProxyAgent,
 } from "openclaw/plugin-sdk/fetch-runtime";
 import { danger, success } from "openclaw/plugin-sdk/runtime-env";
 import { getChildLogger, toPinoLikeLogger } from "openclaw/plugin-sdk/runtime-env";
@@ -18,15 +19,16 @@ import {
   resolveWebCredsBackupPath,
   resolveWebCredsPath,
 } from "./auth-store.js";
+import { assertWebCredsPathRegularFileOrMissing } from "./creds-files.js";
 import {
   enqueueCredsSave,
   waitForCredsSaveQueueWithTimeout,
   writeCredsJsonAtomically,
+  writeWebCredsRawAtomically,
 } from "./creds-persistence.js";
 import { renderQrTerminal } from "./qr-terminal.js";
 import { getStatusCode } from "./session-errors.js";
 import {
-  DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   makeWASocket,
@@ -53,7 +55,6 @@ export {
   WHATSAPP_AUTH_UNSTABLE_CODE,
   WhatsAppAuthUnstableError,
   type WhatsAppWebAuthState,
-  WA_WEB_AUTH_DIR,
   webAuthExists,
 } from "./auth-store.js";
 export {
@@ -63,10 +64,15 @@ export {
 } from "./creds-persistence.js";
 export type { CredsQueueWaitResult } from "./creds-persistence.js";
 
-const LOGGED_OUT_STATUS = DisconnectReason?.loggedOut ?? 401;
+const LOGGED_OUT_STATUS = 401;
 const WHATSAPP_WEBSOCKET_PROXY_TARGET = "https://mmg.whatsapp.net/";
 const CREDS_FLUSH_TIMEOUT_MESSAGE =
   "Queued WhatsApp creds save did not finish before auth bootstrap; skipping repair and continuing with primary creds.";
+export const OPENCLAW_WHATSAPP_WEB_SOCKET_URL_ENV = "OPENCLAW_WHATSAPP_WEB_SOCKET_URL";
+
+async function rejectUnsafeWebCredsPath(authDir: string): Promise<void> {
+  await assertWebCredsPathRegularFileOrMissing(resolveWebCredsPath(authDir));
+}
 
 function enqueueSaveCreds(
   authDir: string,
@@ -96,12 +102,11 @@ async function safeSaveCreds(
     if (raw) {
       try {
         JSON.parse(raw);
-        fsSync.copyFileSync(credsPath, backupPath);
-        try {
-          fsSync.chmodSync(backupPath, 0o600);
-        } catch {
-          // best-effort on platforms that support it
-        }
+        await writeWebCredsRawAtomically({
+          filePath: backupPath,
+          content: raw,
+          tempPrefix: ".creds.backup",
+        });
       } catch {
         // keep existing backup
       }
@@ -121,6 +126,30 @@ async function printTerminalQr(qr: string): Promise<void> {
   process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
 }
 
+function resolveWaWebSocketUrl(value: string | URL | undefined): string | URL | undefined {
+  if (typeof value !== "string") {
+    return value;
+  }
+  return value.trim() || undefined;
+}
+
+function resolveEnvWaWebSocketUrl(): string | undefined {
+  const value = resolveWaWebSocketUrl(process.env[OPENCLAW_WHATSAPP_WEB_SOCKET_URL_ENV]);
+  if (!value) {
+    return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${OPENCLAW_WHATSAPP_WEB_SOCKET_URL_ENV} must be a valid URL.`);
+  }
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error(`${OPENCLAW_WHATSAPP_WEB_SOCKET_URL_ENV} must use ws:// or wss://.`);
+  }
+  return url.toString();
+}
+
 /**
  * Create a Baileys socket backed by the multi-file auth store we keep on disk.
  * Consumers can opt into QR printing for interactive login flows.
@@ -131,6 +160,9 @@ export async function createWaSocket(
   opts: {
     authDir?: string;
     onQr?: (qr: string) => void;
+    getMessage?: (key: WAMessageKey) => Promise<proto.IMessage | undefined>;
+    cachedGroupMetadata?: (jid: string) => Promise<GroupMetadata | undefined>;
+    waWebSocketUrl?: string | URL;
   } & WhatsAppSocketTimingOptions = {},
 ): Promise<ReturnType<typeof makeWASocket>> {
   const baseLogger = getChildLogger(
@@ -141,19 +173,23 @@ export async function createWaSocket(
   );
   const logger = toPinoLikeLogger(baseLogger, verbose ? "info" : "silent");
   const authDir = resolveUserPath(opts.authDir ?? resolveDefaultWebAuthDir());
+  await rejectUnsafeWebCredsPath(authDir);
   await ensureDir(authDir);
   const sessionLogger = getChildLogger({ module: "web-session" });
   const queueResult = await waitForCredsSaveQueueWithTimeout(authDir);
   if (queueResult === "timed_out") {
     sessionLogger.warn({ authDir }, CREDS_FLUSH_TIMEOUT_MESSAGE);
   } else {
+    await rejectUnsafeWebCredsPath(authDir);
     await restoreCredsFromBackupIfNeeded(authDir);
   }
+  await rejectUnsafeWebCredsPath(authDir);
   const { state } = await useMultiFileAuthState(authDir);
   const saveCreds = async () => {
     await writeCredsJsonAtomically(authDir, state.creds);
   };
   const { version } = await fetchLatestBaileysVersion();
+  const waWebSocketUrl = resolveWaWebSocketUrl(opts.waWebSocketUrl) ?? resolveEnvWaWebSocketUrl();
   const agent = await resolveEnvProxyAgent(sessionLogger);
   const fetchAgent = await resolveEnvFetchDispatcher(sessionLogger, agent);
   const socketTiming = {
@@ -179,37 +215,42 @@ export async function createWaSocket(
     // Baileys types still model `fetchAgent` as a Node agent even though the
     // runtime path accepts an undici dispatcher for upload fetches.
     fetchAgent: fetchAgent as Agent | undefined,
+    ...(waWebSocketUrl ? { waWebSocketUrl } : {}),
+    ...(opts.getMessage ? { getMessage: opts.getMessage } : {}),
+    ...(opts.cachedGroupMetadata ? { cachedGroupMetadata: opts.cachedGroupMetadata } : {}),
   });
 
   sock.ev.on("creds.update", () => enqueueSaveCreds(authDir, saveCreds, sessionLogger));
-  sock.ev.on("connection.update", async (update: Partial<import("baileys").ConnectionState>) => {
-    try {
-      const { connection, lastDisconnect, qr } = update;
-      if (qr) {
-        opts.onQr?.(qr);
-        if (printQr) {
-          console.log("Open the WhatsApp app, go to Linked Devices, then scan this QR:");
-          void printTerminalQr(qr).catch((err) => {
-            sessionLogger.warn({ error: String(err) }, "failed rendering WhatsApp QR");
-          });
+  sock.ev.on("connection.update", (update: Partial<import("baileys").ConnectionState>) => {
+    void (async () => {
+      try {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+          opts.onQr?.(qr);
+          if (printQr) {
+            console.log("Open the WhatsApp app, go to Linked Devices, then scan this QR:");
+            void printTerminalQr(qr).catch((err: unknown) => {
+              sessionLogger.warn({ error: String(err) }, "failed rendering WhatsApp QR");
+            });
+          }
         }
-      }
-      if (connection === "close") {
-        const status = getStatusCode(lastDisconnect?.error);
-        if (status === LOGGED_OUT_STATUS) {
-          console.error(
-            danger(
-              `WhatsApp session logged out. Run: ${formatCliCommand("openclaw channels login")}`,
-            ),
-          );
+        if (connection === "close") {
+          const status = getStatusCode(lastDisconnect?.error);
+          if (status === LOGGED_OUT_STATUS) {
+            console.error(
+              danger(
+                `WhatsApp session logged out. Run: ${formatCliCommand("openclaw channels login")}`,
+              ),
+            );
+          }
         }
+        if (connection === "open" && verbose) {
+          console.log(success("WhatsApp Web connected."));
+        }
+      } catch (err) {
+        sessionLogger.error({ error: String(err) }, "connection.update handler error");
       }
-      if (connection === "open" && verbose) {
-        console.log(success("WhatsApp Web connected."));
-      }
-    } catch (err) {
-      sessionLogger.error({ error: String(err) }, "connection.update handler error");
-    }
+    })();
   });
 
   // Handle WebSocket-level errors to prevent unhandled exceptions from crashing the process
@@ -225,15 +266,15 @@ export async function createWaSocket(
 async function resolveEnvProxyAgent(
   logger: ReturnType<typeof getChildLogger>,
 ): Promise<Agent | undefined> {
-  if (!shouldUseEnvHttpProxyForUrl(WHATSAPP_WEBSOCKET_PROXY_TARGET)) {
-    return undefined;
-  }
-  const proxyUrl = resolveEnvHttpProxyUrl("https");
-  if (!proxyUrl) {
-    return undefined;
-  }
   try {
-    const agent = new HttpsProxyAgent(proxyUrl) as Agent;
+    const agent = createNodeProxyAgent({
+      mode: "env",
+      targetUrl: WHATSAPP_WEBSOCKET_PROXY_TARGET,
+      protocol: "https",
+    }) as Agent | undefined;
+    if (!agent) {
+      return undefined;
+    }
     logger.info("Using ambient env proxy for WhatsApp WebSocket connection");
     return agent;
   } catch (error) {
@@ -255,10 +296,7 @@ async function resolveEnvFetchDispatcher(
     return undefined;
   }
   try {
-    const { EnvHttpProxyAgent, ProxyAgent } = await import("undici");
-    return proxyUrl
-      ? new ProxyAgent({ allowH2: false, uri: proxyUrl })
-      : new EnvHttpProxyAgent({ allowH2: false });
+    return proxyUrl ? createHttp1ProxyAgent({ uri: proxyUrl }) : createHttp1EnvHttpProxyAgent();
   } catch (error) {
     logger.warn(
       { error: String(error) },
@@ -269,6 +307,15 @@ async function resolveEnvFetchDispatcher(
 }
 
 function resolveProxyUrlFromAgent(agent: unknown): string | undefined {
+  if (
+    typeof agent === "object" &&
+    agent !== null &&
+    "getProxyForUrl" in agent &&
+    typeof agent.getProxyForUrl === "function"
+  ) {
+    const proxyUrl = agent.getProxyForUrl(WHATSAPP_WEBSOCKET_PROXY_TARGET);
+    return typeof proxyUrl === "string" && proxyUrl.length > 0 ? proxyUrl : undefined;
+  }
   if (typeof agent !== "object" || agent === null || !("proxy" in agent)) {
     return undefined;
   }
@@ -297,29 +344,87 @@ function normalizeEnvProxyValue(value: string | undefined): string | null | unde
   return trimmed.length > 0 ? trimmed : null;
 }
 
-export async function waitForWaConnection(sock: ReturnType<typeof makeWASocket>) {
+export type WhatsAppConnectionWaitOptions =
+  | {
+      timeout: "none";
+    }
+  | {
+      timeoutMs: number;
+    };
+
+export async function waitForWaConnection(
+  sock: ReturnType<typeof makeWASocket>,
+  options: WhatsAppConnectionWaitOptions = { timeout: "none" },
+) {
   return new Promise<void>((resolve, reject) => {
     type OffCapable = {
       off?: (event: string, listener: (...args: unknown[]) => void) => void;
     };
     const evWithOff = sock.ev as unknown as OffCapable;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      evWithOff.off?.("connection.update", handler);
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    };
 
     const handler = (...args: unknown[]) => {
       const update = (args[0] ?? {}) as Partial<import("baileys").ConnectionState>;
       if (update.connection === "open") {
-        evWithOff.off?.("connection.update", handler);
+        cleanup();
         resolve();
       }
       if (update.connection === "close") {
-        evWithOff.off?.("connection.update", handler);
-        reject(update.lastDisconnect ?? new Error("Connection closed"));
+        cleanup();
+        reject(
+          toLintErrorObject(
+            update.lastDisconnect ?? new Error("Connection closed"),
+            "Non-Error rejection",
+          ),
+        );
       }
     };
 
     sock.ev.on("connection.update", handler);
+
+    if ("timeoutMs" in options) {
+      const timeoutMs = options.timeoutMs;
+      timer = setTimeout(() => {
+        cleanup();
+        reject(createConnectionTimeoutError(timeoutMs));
+      }, timeoutMs);
+      timer.unref?.();
+    }
   });
 }
 
 export function newConnectionId() {
   return randomUUID();
+}
+
+function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return new Error(value);
+  }
+  const error = new Error(fallbackMessage, { cause: value });
+  if ((typeof value === "object" && value !== null) || typeof value === "function") {
+    Object.assign(error, value);
+  }
+  return error;
+}
+
+function createConnectionTimeoutError(timeoutMs: number): Error {
+  const error = new Error(`WhatsApp connection timed out after ${timeoutMs}ms`);
+  Object.assign(error, {
+    output: {
+      statusCode: 408,
+    },
+  });
+  return error;
 }

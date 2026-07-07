@@ -1,3 +1,4 @@
+// Register onboard tests cover onboarding command registration and option wiring.
 import { Command } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerOnboardCommand } from "./register.onboard.js";
@@ -35,7 +36,7 @@ vi.mock("../../commands/onboard-core-auth-flags.js", () => ({
 }));
 
 vi.mock("../../plugins/provider-auth-choices.js", () => ({
-  resolveManifestProviderOnboardAuthFlags: () => [
+  resolveProviderOnboardAuthFlags: () => [
     {
       cliOption: "--openai-api-key <key>",
       description: "OpenAI API key",
@@ -65,7 +66,6 @@ describe("registerOnboardCommand", () => {
 
   function setupWizardOptions(callIndex = 0): Record<string, unknown> {
     const call = setupWizardCommandMock.mock.calls[callIndex];
-    expect(call).toBeDefined();
     if (!call) {
       throw new Error(`expected setup wizard call ${callIndex}`);
     }
@@ -103,6 +103,12 @@ describe("registerOnboardCommand", () => {
 
     await runCli(["onboard", "--gateway-port", "nope"]);
     expect(setupWizardOptions(1).gatewayPort).toBeUndefined();
+
+    await runCli(["onboard", "--gateway-port", "18789x"]);
+    expect(setupWizardOptions(2).gatewayPort).toBeUndefined();
+
+    await runCli(["onboard", "--gateway-port", "99999"]);
+    expect(setupWizardOptions(3).gatewayPort).toBeUndefined();
   });
 
   it("forwards --reset-scope to setup wizard options", async () => {

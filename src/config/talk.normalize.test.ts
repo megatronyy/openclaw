@@ -1,3 +1,4 @@
+// Verifies talk-mode config normalization behavior.
 import { describe, expect, it } from "vitest";
 import { TALK_TEST_PROVIDER_ID } from "../test-utils/talk-test-provider.js";
 import { buildTalkConfigResponse, normalizeTalkSection } from "./talk.js";
@@ -43,10 +44,16 @@ describe("talk normalization", () => {
           },
         },
         model: "gpt-realtime",
-        voice: "alloy",
+        speakerVoice: "alloy",
+        speakerVoiceId: "voice-123",
         mode: "realtime",
         transport: "webrtc",
+        vadThreshold: 0.45,
+        silenceDurationMs: 650,
+        prefixPaddingMs: 250,
+        reasoningEffort: " low ",
         brain: "agent-consult",
+        consultRouting: "force-agent-consult",
       },
       interruptOnSpeech: true,
     });
@@ -67,13 +74,32 @@ describe("talk normalization", () => {
           },
         },
         model: "gpt-realtime",
-        voice: "alloy",
+        speakerVoice: "alloy",
+        speakerVoiceId: "voice-123",
         mode: "realtime",
         transport: "webrtc",
+        vadThreshold: 0.45,
+        silenceDurationMs: 650,
+        prefixPaddingMs: 250,
+        reasoningEffort: "low",
         brain: "agent-consult",
+        consultRouting: "force-agent-consult",
       },
       interruptOnSpeech: true,
     });
+  });
+
+  it("drops invalid realtime voice detection defaults", () => {
+    const normalized = normalizeTalkSection({
+      realtime: {
+        vadThreshold: 1.5,
+        silenceDurationMs: 0,
+        prefixPaddingMs: -1,
+        reasoningEffort: "   ",
+      },
+    } as never);
+
+    expect(normalized).toBeUndefined();
   });
 
   it("merges duplicate provider ids after trimming", () => {
@@ -140,16 +166,27 @@ describe("talk normalization", () => {
         providers: {
           openai: {
             model: "gpt-realtime",
-            voice: "alloy",
+            speakerVoice: "alloy",
           },
         },
         instructions: " Speak with crisp diction. ",
       },
     });
 
-    expect(payload?.realtime).toMatchObject({
-      provider: "openai",
-      instructions: "Speak with crisp diction.",
+    expect(payload?.realtime?.provider).toBe("openai");
+    expect(payload?.realtime?.instructions).toBe("Speak with crisp diction.");
+  });
+
+  it("maps legacy realtime voice to speakerVoice while preserving legacy output", () => {
+    const normalized = normalizeTalkSection({
+      realtime: {
+        voice: " alloy ",
+      },
+    });
+
+    expect(normalized?.realtime).toEqual({
+      speakerVoice: "alloy",
+      voice: "alloy",
     });
   });
 
@@ -191,6 +228,21 @@ describe("talk normalization", () => {
       },
     });
   });
+
+  it.each(["constructor", "__proto__"])(
+    "does not resolve inherited Object.prototype provider key %s",
+    (provider) => {
+      const payload = buildTalkConfigResponse({
+        provider,
+        providers: {
+          elevenlabs: { voiceId: "voice-123" },
+        },
+      });
+
+      expect(payload?.resolved).toBeUndefined();
+      expect(payload?.provider).toBeUndefined();
+    },
+  );
 
   it("preserves SecretRef apiKey values during normalization", () => {
     const normalized = normalizeTalkSection({

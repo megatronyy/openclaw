@@ -1,3 +1,4 @@
+// Discord tests cover listeners plugin behavior.
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 let DiscordMessageListener: typeof import("./listeners.js").DiscordMessageListener;
@@ -12,6 +13,15 @@ function createLogger() {
     error: vi.fn(),
     warn: vi.fn(),
   };
+}
+
+function firstErrorMessage(logger: ReturnType<typeof createLogger>): string {
+  const firstCall = logger.error.mock.calls[0];
+  if (!firstCall) {
+    throw new Error("expected logger.error call");
+  }
+  expect(firstCall).toHaveLength(1);
+  return String(firstCall[0]);
 }
 
 function fakeEvent(channelId: string) {
@@ -136,10 +146,7 @@ describe("DiscordMessageListener", () => {
     await expect(listener.handle(fakeEvent("ch-1"), {} as never)).resolves.toBeUndefined();
     await flushAsyncWork();
     expect(logger.error).toHaveBeenCalledTimes(1);
-    expect(logger.error.mock.calls[0]).toHaveLength(1);
-    expect(String(logger.error.mock.calls[0]?.[0])).toContain(
-      "discord handler failed: Error: boom",
-    );
+    expect(firstErrorMessage(logger)).toContain("discord handler failed: Error: boom");
   });
 
   it("calls onEvent callback for each message", async () => {
@@ -185,8 +192,7 @@ describe("DiscordInteractionListener", () => {
     await flushAsyncWork();
 
     expect(logger.error).toHaveBeenCalledTimes(1);
-    expect(logger.error.mock.calls[0]).toHaveLength(1);
-    expect(String(logger.error.mock.calls[0]?.[0])).toContain(
+    expect(firstErrorMessage(logger)).toContain(
       "discord interaction handler failed: Error: interaction boom",
     );
   });

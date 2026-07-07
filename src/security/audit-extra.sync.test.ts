@@ -1,10 +1,10 @@
+// Covers synchronous extra security audit aggregation.
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import {
   collectAttackSurfaceSummaryFindings,
   collectSmallModelRiskFindings,
 } from "./audit-extra.summary.js";
-import { safeEqualSecret } from "./secret-equal.js";
 
 vi.mock("../plugins/web-search-credential-presence.js", () => ({
   hasConfiguredWebSearchCredential: () => false,
@@ -55,21 +55,6 @@ describe("collectAttackSurfaceSummaryFindings", () => {
     for (const snippet of expectedDetail) {
       expect(finding.detail).toContain(snippet);
     }
-  });
-});
-
-describe("safeEqualSecret", () => {
-  it.each([
-    ["secret-token", "secret-token", true],
-    ["secret-token", "secret-tokEn", false],
-    ["short", "much-longer", false],
-    ["", "", true],
-    ["", "secret", false],
-    [undefined, "secret", false],
-    ["secret", undefined, false],
-    [null, "secret", false],
-  ] as const)("compares %o and %o", (left, right, expected) => {
-    expect(safeEqualSecret(left, right)).toBe(expected);
   });
 });
 

@@ -1,3 +1,4 @@
+// Core command registry that lazily imports command groups based on parsed argv.
 import type { Command } from "commander";
 import { resolveCliArgvInvocation } from "../argv-invocation.js";
 import { shouldRegisterPrimaryCommandOnly } from "../command-registration-policy.js";
@@ -87,6 +88,11 @@ const coreEntrySpecs: readonly CommandGroupDescriptorSpec<
         exportName: "registerMigrateCommand",
       },
       {
+        commandNames: ["audit"],
+        loadModule: () => import("./register.audit.js"),
+        exportName: "registerAuditCommand",
+      },
+      {
         commandNames: ["doctor", "dashboard", "reset", "uninstall"],
         loadModule: () => import("./register.maintenance.js"),
         exportName: "registerMaintenanceCommands",
@@ -107,15 +113,27 @@ const coreEntrySpecs: readonly CommandGroupDescriptorSpec<
         loadModule: () => import("../mcp-cli.js"),
         exportName: "registerMcpCli",
       },
+      {
+        commandNames: ["transcripts"],
+        loadModule: () => import("./register.transcripts.js"),
+        exportName: "registerTranscriptsCli",
+      },
     ]),
   ),
   defineImportedCommandGroupSpec(
-    ["agent", "agents"],
-    () => import("./register.agent.js"),
+    ["agent"],
+    () => import("./register.agent-turn.js"),
     (mod, { program, ctx }) => {
-      mod.registerAgentCommands(program, {
+      mod.registerAgentTurnCommand(program, {
         agentChannelOptions: ctx.agentChannelOptions,
       });
+    },
+  ),
+  defineImportedCommandGroupSpec(
+    ["agents"],
+    () => import("./register.agent.js"),
+    (mod, { program }) => {
+      mod.registerAgentsCommands(program);
     },
   ),
   ...withProgramOnlySpecs(
@@ -130,6 +148,7 @@ const coreEntrySpecs: readonly CommandGroupDescriptorSpec<
 ];
 
 function resolveCoreCommandGroups(ctx: ProgramContext, argv: string[]): CommandGroupEntry[] {
+  // Descriptor metadata and import specs stay separate so help can stay cheap.
   return buildCommandGroupEntries(
     getCoreCliCommandDescriptors(),
     coreEntrySpecs,

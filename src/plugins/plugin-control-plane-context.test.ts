@@ -1,3 +1,6 @@
+// Verifies plugin control-plane context construction and boundaries.
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { InstalledPluginIndex } from "./installed-plugin-index.js";
 import {
@@ -104,7 +107,7 @@ describe("plugin control-plane context", () => {
       discovery: {
         loadPaths: ["/opt/plugins"],
         roots: {
-          stock: "/tmp/openclaw-empty-bundled-plugins",
+          stock: path.join(os.tmpdir(), "openclaw-empty-bundled-plugins"),
           global: "/openclaw/a/.openclaw/extensions",
           workspace: undefined,
         },

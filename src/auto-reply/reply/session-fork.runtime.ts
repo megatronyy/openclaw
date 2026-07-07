@@ -1,19 +1,26 @@
+/** Runtime implementation for forking sessions from parent transcripts. */
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
-  CURRENT_SESSION_VERSION,
   migrateSessionEntries,
   parseSessionEntries,
-  type FileEntry,
-  type SessionEntry as PiSessionEntry,
+  type SessionEntry as AgentSessionEntry,
   type SessionHeader,
-} from "@earendil-works/pi-coding-agent";
+} from "../../agents/sessions/session-manager.js";
 import { derivePromptTokens } from "../../agents/usage.js";
 import {
   resolveSessionFilePath,
   resolveSessionFilePathOptions,
 } from "../../config/sessions/paths.js";
+import { createForkedSessionTranscript } from "../../config/sessions/session-accessor.js";
+import {
+  isSessionTranscriptLeafControl,
+  mergeSessionTranscriptVisiblePathWithOpaqueAppendPath,
+  scanSessionTranscriptTree,
+  selectSessionTranscriptTreePathNodes,
+} from "../../config/sessions/transcript-tree.js";
 import {
   resolveFreshSessionTotalTokens,
   type SessionEntry as StoreSessionEntry,
@@ -25,7 +32,10 @@ type ForkSourceTranscript = {
   cwd: string;
   sessionDir: string;
   leafId: string | null;
-  branchEntries: PiSessionEntry[];
+  appendParentId: string | null;
+  appendMode?: "side";
+  preserveLeafControl: boolean;
+  branchEntries: unknown[];
   labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }>;
 };
 
@@ -65,6 +75,7 @@ async function estimateParentTranscriptTokensFromBytes(params: {
   }
 }
 
+/** Resolves the best available token count for a parent session before forking. */
 export async function resolveParentForkTokenCountRuntime(params: {
   parentEntry: StoreSessionEntry;
   storePath: string;
@@ -84,52 +95,36 @@ export async function resolveParentForkTokenCountRuntime(params: {
       undefined,
       1024 * 1024,
     );
-    const promptTokens = resolvePositiveTokenCount(
-      derivePromptTokens({
-        input: usage?.inputTokens,
-        cacheRead: usage?.cacheRead,
-        cacheWrite: usage?.cacheWrite,
-      }),
-    );
-    const outputTokens = resolvePositiveTokenCount(usage?.outputTokens);
-    if (typeof promptTokens === "number") {
-      return maxPositiveTokenCount(
-        promptTokens + (outputTokens ?? 0),
-        cachedTokens,
-        byteEstimateTokens,
+    let transcriptTokens: number | undefined;
+    if (usage?.contextUsage?.state === "available") {
+      const trailingTokens = Math.ceil(
+        (usage.trailingBytes ?? 0) / FALLBACK_TRANSCRIPT_BYTES_PER_TOKEN,
       );
+      transcriptTokens = resolvePositiveTokenCount(usage.contextUsage.totalTokens + trailingTokens);
+      if (typeof transcriptTokens === "number") {
+        return transcriptTokens;
+      }
+    } else if (usage?.contextUsage?.state !== "unavailable") {
+      const promptTokens = resolvePositiveTokenCount(
+        derivePromptTokens({
+          input: usage?.inputTokens,
+          cacheRead: usage?.cacheRead,
+          cacheWrite: usage?.cacheWrite,
+        }),
+      );
+      const outputTokens = resolvePositiveTokenCount(usage?.outputTokens);
+      if (typeof promptTokens === "number") {
+        transcriptTokens = promptTokens + (outputTokens ?? 0);
+      }
+    }
+    if (typeof transcriptTokens === "number") {
+      return maxPositiveTokenCount(transcriptTokens, cachedTokens, byteEstimateTokens);
     }
   } catch {
     // Fall back to cached totals when recent transcript usage cannot be read.
   }
 
   return maxPositiveTokenCount(cachedTokens, byteEstimateTokens);
-}
-
-function isSessionEntry(entry: FileEntry): entry is PiSessionEntry {
-  return (
-    entry.type !== "session" &&
-    typeof (entry as { id?: unknown }).id === "string" &&
-    (typeof (entry as { timestamp?: unknown }).timestamp === "string" ||
-      typeof (entry as { timestamp?: unknown }).timestamp === "number")
-  );
-}
-
-function buildEntryIndex(entries: PiSessionEntry[]): Map<string, PiSessionEntry> {
-  return new Map(entries.map((entry) => [entry.id, entry]));
-}
-
-function readBranch(params: {
-  byId: Map<string, PiSessionEntry>;
-  leafId: string | null;
-}): PiSessionEntry[] {
-  const branchEntries: PiSessionEntry[] = [];
-  let current = params.leafId ? params.byId.get(params.leafId) : undefined;
-  while (current) {
-    branchEntries.unshift(current);
-    current = current.parentId ? params.byId.get(current.parentId) : undefined;
-  }
-  return branchEntries;
 }
 
 function generateEntryId(existingIds: Set<string>): string {
@@ -145,15 +140,31 @@ function generateEntryId(existingIds: Set<string>): string {
   return id;
 }
 
+function hasAssistantEntry(entries: unknown[]): boolean {
+  return entries.some(
+    (entry) =>
+      isRecord(entry) &&
+      entry.type === "message" &&
+      isRecord(entry.message) &&
+      entry.message.role === "assistant",
+  );
+}
+
 function collectBranchLabels(params: {
-  allEntries: PiSessionEntry[];
+  allEntries: unknown[];
   pathEntryIds: Set<string>;
 }): Array<{ targetId: string; label: string; timestamp: string }> {
   const labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }> = [];
   for (const entry of params.allEntries) {
+    if (!isRecord(entry)) {
+      continue;
+    }
     if (
       entry.type === "label" &&
-      entry.label &&
+      typeof entry.label === "string" &&
+      typeof entry.targetId === "string" &&
+      typeof entry.id === "string" &&
+      !params.pathEntryIds.has(entry.id) &&
       params.pathEntryIds.has(entry.targetId) &&
       typeof entry.timestamp === "string"
     ) {
@@ -175,17 +186,38 @@ async function readForkSourceTranscript(
   migrateSessionEntries(fileEntries);
   const header =
     fileEntries.find((entry): entry is SessionHeader => entry.type === "session") ?? null;
-  const entries = fileEntries.filter(isSessionEntry);
-  const byId = buildEntryIndex(entries);
-  const leafId = entries.at(-1)?.id ?? null;
-  const branchEntries = readBranch({ byId, leafId });
+  const entries = fileEntries.filter((entry) => entry.type !== "session");
+  const tree = scanSessionTranscriptTree(entries);
+  const leafId = tree.leafId;
+  const appendParentId = tree.appendParentId;
+  const visiblePath = selectSessionTranscriptTreePathNodes(tree, leafId);
+  const appendPath = selectSessionTranscriptTreePathNodes(tree, appendParentId);
+  const mergedPath = mergeSessionTranscriptVisiblePathWithOpaqueAppendPath({
+    visiblePath,
+    appendPath,
+    appendParentId,
+  });
+  const branchEntries = mergedPath.nodes.flatMap((node) => {
+    if (!isRecord(node.entry)) {
+      return [];
+    }
+    const parentId = node.selectedParentId;
+    return [node.entry.parentId === parentId ? node.entry : { ...node.entry, parentId }];
+  });
   const pathEntryIds = new Set(
-    branchEntries.filter((entry) => entry.type !== "label").map((entry) => entry.id),
+    branchEntries.flatMap((entry) =>
+      isRecord(entry) && typeof entry.id === "string" ? [entry.id] : [],
+    ),
   );
+  const lastLeafUpdateNode = tree.nodes.findLast((node) => node.leafId !== undefined);
+  const lastLeafUpdateEntry = lastLeafUpdateNode?.entry;
   return {
     cwd: header?.cwd ?? process.cwd(),
     sessionDir: path.dirname(parentSessionFile),
     leafId,
+    appendParentId: mergedPath.appendParentId,
+    ...(lastLeafUpdateNode?.appendMode ? { appendMode: lastLeafUpdateNode.appendMode } : {}),
+    preserveLeafControl: isSessionTranscriptLeafControl(lastLeafUpdateEntry),
     branchEntries,
     labelsToWrite: collectBranchLabels({ allEntries: entries, pathEntryIds }),
   };
@@ -195,9 +227,9 @@ function buildBranchLabelEntries(params: {
   labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }>;
   pathEntryIds: Set<string>;
   lastEntryId: string | null;
-}): PiSessionEntry[] {
+}): AgentSessionEntry[] {
   let parentId = params.lastEntryId;
-  const labelEntries: PiSessionEntry[] = [];
+  const labelEntries: AgentSessionEntry[] = [];
   for (const { targetId, label, timestamp } of params.labelsToWrite) {
     const labelEntry = {
       type: "label",
@@ -206,7 +238,7 @@ function buildBranchLabelEntries(params: {
       timestamp,
       targetId,
       label,
-    } satisfies PiSessionEntry;
+    } satisfies AgentSessionEntry;
     params.pathEntryIds.add(labelEntry.id);
     labelEntries.push(labelEntry);
     parentId = labelEntry.id;
@@ -214,78 +246,54 @@ function buildBranchLabelEntries(params: {
   return labelEntries;
 }
 
-async function writeForkHeaderOnly(params: {
-  parentSessionFile: string;
-  sessionDir: string;
-  cwd: string;
-}): Promise<{ sessionId: string; sessionFile: string }> {
-  const sessionId = crypto.randomUUID();
-  const timestamp = new Date().toISOString();
-  const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-  const sessionFile = path.join(params.sessionDir, `${fileTimestamp}_${sessionId}.jsonl`);
-  const header = {
-    type: "session",
-    version: CURRENT_SESSION_VERSION,
-    id: sessionId,
-    timestamp,
-    cwd: params.cwd,
-    parentSession: params.parentSessionFile,
-  } satisfies SessionHeader;
-  await fs.mkdir(path.dirname(sessionFile), { recursive: true });
-  await fs.writeFile(sessionFile, `${JSON.stringify(header)}\n`, {
-    encoding: "utf-8",
-    mode: 0o600,
-    flag: "wx",
-  });
-  return { sessionId, sessionFile };
-}
-
 async function writeBranchedSession(params: {
   parentSessionFile: string;
   source: ForkSourceTranscript;
+  sessionDir: string;
 }): Promise<{ sessionId: string; sessionFile: string }> {
-  const sessionId = crypto.randomUUID();
-  const timestamp = new Date().toISOString();
-  const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-  const sessionFile = path.join(params.source.sessionDir, `${fileTimestamp}_${sessionId}.jsonl`);
-  const pathWithoutLabels = params.source.branchEntries.filter((entry) => entry.type !== "label");
-  const pathEntryIds = new Set(pathWithoutLabels.map((entry) => entry.id));
+  const pathEntries = params.source.branchEntries;
+  const pathEntryIds = new Set(
+    pathEntries.flatMap((entry) =>
+      isRecord(entry) && typeof entry.id === "string" ? [entry.id] : [],
+    ),
+  );
+  const lastPathEntry = pathEntries.at(-1);
+  const lastPathEntryId =
+    isRecord(lastPathEntry) && typeof lastPathEntry.id === "string" ? lastPathEntry.id : null;
   const labelEntries = buildBranchLabelEntries({
     labelsToWrite: params.source.labelsToWrite,
     pathEntryIds,
-    lastEntryId: pathWithoutLabels.at(-1)?.id ?? null,
+    lastEntryId: lastPathEntryId,
   });
-  const header = {
-    type: "session",
-    version: CURRENT_SESSION_VERSION,
-    id: sessionId,
-    timestamp,
+  return await createForkedSessionTranscript({
     cwd: params.source.cwd,
-    parentSession: params.parentSessionFile,
-  } satisfies SessionHeader;
-  const entries = [header, ...pathWithoutLabels, ...labelEntries];
-  const hasAssistant = entries.some(
-    (entry) => entry.type === "message" && entry.message.role === "assistant",
-  );
-  if (hasAssistant) {
-    await fs.mkdir(path.dirname(sessionFile), { recursive: true });
-    await fs.writeFile(
-      sessionFile,
-      `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
-      {
-        encoding: "utf-8",
-        mode: 0o600,
-        flag: "wx",
-      },
-    );
-  }
-  return { sessionId, sessionFile };
+    parentSessionFile: params.parentSessionFile,
+    sessionsDir: params.sessionDir,
+    buildEntries: ({ timestamp }) => {
+      // The leaf-control record shares the fork header timestamp so the copied
+      // branch reopens on the same active leaf the parent displayed.
+      const leafEntry = params.source.preserveLeafControl
+        ? {
+            type: "leaf",
+            id: generateEntryId(pathEntryIds),
+            parentId: labelEntries.at(-1)?.id ?? lastPathEntryId,
+            timestamp,
+            targetId: params.source.leafId,
+            appendParentId: params.source.appendParentId,
+            ...(params.source.appendMode ? { appendMode: params.source.appendMode } : {}),
+          }
+        : null;
+      return [...pathEntries, ...labelEntries, ...(leafEntry ? [leafEntry] : [])];
+    },
+  });
 }
 
+/** Creates a child session transcript from a parent session branch. */
 export async function forkSessionFromParentRuntime(params: {
   parentEntry: StoreSessionEntry;
   agentId: string;
   sessionsDir: string;
+  targetSessionsDir?: string;
 }): Promise<{ sessionId: string; sessionFile: string } | null> {
   const parentSessionFile = resolveSessionFilePath(
     params.parentEntry.sessionId,
@@ -300,12 +308,16 @@ export async function forkSessionFromParentRuntime(params: {
     if (!source) {
       return null;
     }
-    return source.leafId
-      ? await writeBranchedSession({ parentSessionFile, source })
-      : await writeForkHeaderOnly({
-          parentSessionFile,
-          sessionDir: source.sessionDir,
+    const shouldPersistBranch =
+      source.preserveLeafControl || hasAssistantEntry(source.branchEntries);
+    const targetSessionsDir = params.targetSessionsDir ?? source.sessionDir;
+    return shouldPersistBranch
+      ? await writeBranchedSession({ parentSessionFile, source, sessionDir: targetSessionsDir })
+      : // Header-only fork: nothing on the active branch is worth copying.
+        await createForkedSessionTranscript({
           cwd: source.cwd,
+          parentSessionFile,
+          sessionsDir: targetSessionsDir,
         });
   } catch {
     return null;

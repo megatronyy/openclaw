@@ -1,3 +1,4 @@
+/** Tests provider replay helper normalization and deterministic ordering. */
 import { describe, expect, it } from "vitest";
 import {
   buildAnthropicReplayPolicyForModel,
@@ -12,8 +13,9 @@ import {
 } from "./provider-replay-helpers.js";
 
 function expectFields(actual: unknown, expected: Record<string, unknown>): void {
-  expect(actual).toBeDefined();
-  expect(typeof actual).toBe("object");
+  if (!actual || typeof actual !== "object") {
+    throw new Error("Expected record");
+  }
   const record = actual as Record<string, unknown>;
   for (const [key, value] of Object.entries(expected)) {
     expect(record[key]).toEqual(value);
@@ -44,6 +46,19 @@ describe("provider replay helpers", () => {
     expect(policy).not.toHaveProperty("toolCallIdMode");
   });
 
+  it("selects OpenAI-style ids for duplicate replay tool calls", () => {
+    expectFields(
+      buildOpenAICompatibleReplayPolicy("openai-completions", {
+        duplicateToolCallIdStyle: "openai",
+      }),
+      {
+        sanitizeToolCallIds: true,
+        toolCallIdMode: "strict",
+        duplicateToolCallIdStyle: "openai",
+      },
+    );
+  });
+
   it("drops historical reasoning for OpenAI-compatible chat completions replay", () => {
     expect(
       buildOpenAICompatibleReplayPolicy("openai-completions", {
@@ -61,7 +76,7 @@ describe("provider replay helpers", () => {
         modelId: "google/gemma-4-26b-a4b-it",
         dropReasoningFromHistory: false,
       }),
-    ).toHaveProperty("dropReasoningFromHistory", true);
+    ).not.toHaveProperty("dropReasoningFromHistory");
     expect(
       buildOpenAICompatibleReplayPolicy("openai-responses", {
         modelId: "google/gemma-4-26b-a4b-it",
@@ -77,6 +92,7 @@ describe("provider replay helpers", () => {
       applyAssistantFirstOrderingFix: false,
       validateGeminiTurns: false,
       validateAnthropicTurns: false,
+      allowSyntheticToolResults: true,
     });
     expect(policy).not.toHaveProperty("sanitizeToolCallIds");
     expect(policy).not.toHaveProperty("toolCallIdMode");
@@ -115,6 +131,7 @@ describe("provider replay helpers", () => {
   it("preserves thinking blocks for Claude Opus 4.5+ and Sonnet 4.5+ models", () => {
     // These models should NOT drop thinking blocks
     for (const modelId of [
+      "claude-fable-5",
       "claude-opus-4-5-20251101",
       "claude-opus-4-6",
       "claude-sonnet-4-5-20250929",

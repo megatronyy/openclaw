@@ -1,5 +1,11 @@
-import { parseFenceSpans } from "../markdown/fences.js";
+// Renders chat canvas payloads into text and metadata for transcript output.
+import { safeParseJson } from "@openclaw/normalization-core";
+import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { parseFenceSpans } from "../../packages/markdown-core/src/fences.js";
 
+// Extracts assistant-message canvas previews from tool JSON or markdown embed
+// shortcodes. The returned text strips consumed shortcodes for channel delivery.
 type CanvasSurface = "assistant_message";
 
 type CanvasPreview = {
@@ -14,20 +20,6 @@ type CanvasPreview = {
   style?: string;
 };
 
-function tryParseJsonRecord(value: string | undefined): Record<string, unknown> | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function getRecordStringField(
   record: Record<string, unknown> | undefined,
   key: string,
@@ -41,7 +33,7 @@ function getRecordNumberField(
   key: string,
 ): number | undefined {
   const value = record?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return asFiniteNumber(value);
 }
 
 function getNestedRecord(
@@ -49,9 +41,7 @@ function getNestedRecord(
   key: string,
 ): Record<string, unknown> | undefined {
   const value = record?.[key];
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
+  return asOptionalRecord(value);
 }
 
 function normalizeSurface(value: string | undefined): CanvasSurface | undefined {
@@ -178,14 +168,16 @@ function previewFromShortcode(attrs: Record<string, string>): CanvasPreview | un
   return undefined;
 }
 
+/** Extracts a canvas preview from a JSON-shaped tool or assistant payload. */
 export function extractCanvasFromText(
   outputText: string | undefined,
   _toolName?: string,
 ): CanvasPreview | undefined {
-  const parsed = tryParseJsonRecord(outputText);
+  const parsed = outputText ? asOptionalRecord(safeParseJson(outputText)) : undefined;
   return coerceCanvasPreview(parsed);
 }
 
+/** Extracts [embed ...] shortcodes outside code fences and returns stripped text. */
 export function extractCanvasShortcodes(text: string | undefined): {
   text: string;
   previews: CanvasPreview[];
@@ -200,13 +192,17 @@ export function extractCanvasShortcodes(text: string | undefined): {
     attrs: Record<string, string>;
     body?: string;
   }> = [];
-  const blockRe = /\[embed\s+([^\]]*?)\]([\s\S]*?)\[\/embed\]/gi;
+  // Exclude a self-closing open tag ("[embed ... /]") from starting a block
+  // match by requiring the attrs group not to end with a slash; otherwise the
+  // block regex greedily swallows visible text up to a later stray [/embed].
+  const blockRe = /\[embed\s+([^\]]*?[^\]/]|)\]([\s\S]*?)\[\/embed\]/gi;
   const selfClosingRe = /\[embed\s+([^\]]*?)\/\]/gi;
   for (const re of [blockRe, selfClosingRe]) {
     let match: RegExpExecArray | null;
     while ((match = re.exec(text))) {
       const start = match.index ?? 0;
       if (fenceSpans.some((span) => start >= span.start && start < span.end)) {
+        // Literal embed examples in code blocks must remain visible text.
         continue;
       }
       matches.push({
@@ -226,6 +222,8 @@ export function extractCanvasShortcodes(text: string | undefined): {
   let stripped = "";
   for (const match of matches) {
     if (match.start < cursor) {
+      // Prefer the first non-overlapping shortcode so nested/overlapping input
+      // cannot strip arbitrary text outside the matched span.
       continue;
     }
     stripped += text.slice(cursor, match.start);

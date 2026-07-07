@@ -1,3 +1,4 @@
+// Zalouser tests cover channel.sendpayload plugin behavior.
 import {
   installChannelOutboundPayloadContractSuite,
   primeChannelOutboundSendMock,
@@ -6,7 +7,7 @@ import {
 import {
   createMessageReceiptFromOutboundResults,
   verifyChannelMessageAdapterCapabilityProofs,
-} from "openclaw/plugin-sdk/channel-message";
+} from "openclaw/plugin-sdk/channel-outbound";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "./accounts.test-mocks.js";
 import "./zalo-js.test-mocks.js";
@@ -80,7 +81,17 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 function requireSendOptions(
   mockedSend: ReturnType<typeof vi.mocked<(typeof import("./send.js"))["sendMessageZalouser"]>>,
 ): Record<string, unknown> {
-  return requireRecord(mockedSend.mock.calls[0]?.[2], "Zalouser send options");
+  return requireRecord(requireSendCall(mockedSend)[2], "Zalouser send options");
+}
+
+function requireSendCall(
+  mockedSend: ReturnType<typeof vi.mocked<(typeof import("./send.js"))["sendMessageZalouser"]>>,
+): unknown[] {
+  const [call] = mockedSend.mock.calls as unknown[][];
+  if (!call) {
+    throw new Error("expected Zalouser send call");
+  }
+  return call;
 }
 
 describe("zalouserPlugin outbound sendPayload", () => {
@@ -109,8 +120,9 @@ describe("zalouserPlugin outbound sendPayload", () => {
     });
 
     expect(mockedSend).toHaveBeenCalledOnce();
-    expect(mockedSend.mock.calls[0]?.[0]).toBe("1471383327500481391");
-    expect(mockedSend.mock.calls[0]?.[1]).toBe("hello group");
+    const sendCall = requireSendCall(mockedSend);
+    expect(sendCall[0]).toBe("1471383327500481391");
+    expect(sendCall[1]).toBe("hello group");
     const options = requireSendOptions(mockedSend);
     expect(options.isGroup).toBe(true);
     expect(options.textMode).toBe("markdown");
@@ -128,8 +140,9 @@ describe("zalouserPlugin outbound sendPayload", () => {
     });
 
     expect(mockedSend).toHaveBeenCalledOnce();
-    expect(mockedSend.mock.calls[0]?.[0]).toBe("987654321");
-    expect(mockedSend.mock.calls[0]?.[1]).toBe("hello");
+    const sendCall = requireSendCall(mockedSend);
+    expect(sendCall[0]).toBe("987654321");
+    expect(sendCall[1]).toBe("hello");
     const options = requireSendOptions(mockedSend);
     expect(options.isGroup).toBe(false);
     expect(options.textMode).toBe("markdown");
@@ -147,8 +160,9 @@ describe("zalouserPlugin outbound sendPayload", () => {
     });
 
     expect(mockedSend).toHaveBeenCalledOnce();
-    expect(mockedSend.mock.calls[0]?.[0]).toBe("g-1471383327500481391");
-    expect(mockedSend.mock.calls[0]?.[1]).toBe("hello native group");
+    const sendCall = requireSendCall(mockedSend);
+    expect(sendCall[0]).toBe("g-1471383327500481391");
+    expect(sendCall[1]).toBe("hello native group");
     const options = requireSendOptions(mockedSend);
     expect(options.isGroup).toBe(true);
     expect(options.textMode).toBe("markdown");
@@ -167,8 +181,9 @@ describe("zalouserPlugin outbound sendPayload", () => {
     });
 
     expect(mockedSend).toHaveBeenCalledTimes(1);
-    expect(mockedSend.mock.calls[0]?.[0]).toBe("987654321");
-    expect(mockedSend.mock.calls[0]?.[1]).toBe(text);
+    const sendCall = requireSendCall(mockedSend);
+    expect(sendCall[0]).toBe("987654321");
+    expect(sendCall[1]).toBe(text);
     const options = requireSendOptions(mockedSend);
     expect(options.isGroup).toBe(false);
     expect(options.textMode).toBe("markdown");
@@ -176,6 +191,59 @@ describe("zalouserPlugin outbound sendPayload", () => {
     expect(options.textChunkLimit).toBe(1200);
     expect(result.channel).toBe("zalouser");
     expect(result.messageId).toBe("zlu-code");
+  });
+
+  it("forwards internal chunk progress through the outbound adapter", async () => {
+    mockedSend.mockImplementationOnce(async (_threadId, _text, options) => {
+      const onDeliveryResult = options?.onDeliveryResult;
+      if (!onDeliveryResult) {
+        throw new Error("missing progress callback");
+      }
+      await onDeliveryResult({ ok: true, messageId: "zlu-part-1" } as never);
+      await onDeliveryResult({ ok: true, messageId: "zlu-part-2" } as never);
+      return { ok: true, messageId: "zlu-part-2" } as never;
+    });
+    const onDeliveryResult = vi.fn();
+    const sendPayload = requireZalouserSendPayload();
+
+    await sendPayload({
+      ...baseCtx({ text: "chunked internally" }),
+      to: "987654321",
+      onDeliveryResult,
+    });
+
+    expect(onDeliveryResult.mock.calls.map((call) => call[0]?.messageId)).toEqual([
+      "zlu-part-1",
+      "zlu-part-2",
+    ]);
+  });
+
+  it("forwards internal chunk progress through the message adapter", async () => {
+    const receipt = createMessageReceiptFromOutboundResults({
+      results: [{ channel: "zalouser", messageId: "zlu-message-part" }],
+      kind: "text",
+    });
+    mockedSend.mockImplementationOnce(async (_threadId, _text, options) => {
+      const onDeliveryResult = options?.onDeliveryResult;
+      if (!onDeliveryResult) {
+        throw new Error("missing progress callback");
+      }
+      await onDeliveryResult({ ok: true, messageId: "zlu-message-part", receipt } as never);
+      return { ok: true, messageId: "zlu-message-part", receipt } as never;
+    });
+    const onDeliveryResult = vi.fn();
+    const sendText = requireZalouserTextSender(requireZalouserMessageAdapter());
+
+    await sendText({
+      cfg: {},
+      to: "user:987654321",
+      text: "chunked internally",
+      onDeliveryResult,
+    });
+
+    expect(onDeliveryResult).toHaveBeenCalledOnce();
+    expect(onDeliveryResult.mock.calls[0]?.[0]?.messageId).toBe("zlu-message-part");
+    expect(onDeliveryResult.mock.calls[0]?.[0]?.receipt).toBe(receipt);
   });
 
   it("declares message adapter durable text and media with receipt proofs", async () => {

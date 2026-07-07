@@ -1,23 +1,25 @@
-import { resolveAgentAvatar } from "openclaw/plugin-sdk/agent-runtime";
-import { sendDurableMessageBatch } from "openclaw/plugin-sdk/channel-message";
+// Discord plugin module implements reply delivery behavior.
+import { formatReasoningMessage, resolveAgentAvatar } from "openclaw/plugin-sdk/agent-runtime";
+import {
+  buildOutboundSessionContext,
+  sendDurableMessageBatch,
+  type OutboundDeliveryFormattingOptions,
+  type OutboundIdentity,
+  type OutboundSendDeps,
+} from "openclaw/plugin-sdk/channel-outbound";
 import type {
   MarkdownTableMode,
   OpenClawConfig,
   ReplyToMode,
 } from "openclaw/plugin-sdk/config-contracts";
 import type { OutboundMediaAccess } from "openclaw/plugin-sdk/media-runtime";
-import {
-  buildOutboundSessionContext,
-  type OutboundDeliveryFormattingOptions,
-  type OutboundIdentity,
-  type OutboundSendDeps,
-} from "openclaw/plugin-sdk/outbound-runtime";
 import type { ChunkMode } from "openclaw/plugin-sdk/reply-chunking";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-dispatch-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { RequestClient } from "../internal/discord.js";
 import { sendMessageDiscord, sendVoiceMessageDiscord } from "../send.js";
+import type { DiscordAllowedMentions } from "../send.shared.js";
 import { sanitizeDiscordFrontChannelReplyPayloads } from "./reply-safety.js";
 
 export type DiscordThreadBindingLookupRecord = {
@@ -87,14 +89,18 @@ function createDiscordDeliveryDeps(params: {
   cfg: OpenClawConfig;
   token: string;
   rest?: RequestClient;
+  allowedMentions?: DiscordAllowedMentions;
 }): OutboundSendDeps {
   return {
+    // Discord webhooks default to user-only parsing; bot messages need this
+    // explicit policy to prevent a fresh preview final from broadcasting.
     discord: (to: string, text: string, opts?: Parameters<typeof sendMessageDiscord>[2]) =>
       sendMessageDiscord(to, text, {
         ...opts,
         cfg: opts?.cfg ?? params.cfg,
         token: params.token,
         rest: params.rest,
+        ...(params.allowedMentions ? { allowedMentions: params.allowedMentions } : {}),
       }),
     discordVoice: (
       to: string,
@@ -155,6 +161,19 @@ function resolveDiscordDeliveryOptions(params: {
   };
 }
 
+function formatDiscordReasoningPayload(payload: ReplyPayload): ReplyPayload {
+  if (payload.isReasoning !== true) {
+    return payload;
+  }
+  const text = typeof payload.text === "string" ? payload.text.trim() : "";
+  const nextPayload: ReplyPayload = {
+    ...payload,
+    text: formatReasoningMessage(text),
+  };
+  delete nextPayload.isReasoning;
+  return nextPayload;
+}
+
 export async function deliverDiscordReply(params: {
   cfg: OpenClawConfig;
   replies: ReplyPayload[];
@@ -172,11 +191,15 @@ export async function deliverDiscordReply(params: {
   sessionKey?: string;
   threadBindings?: DiscordThreadBindingLookup;
   mediaLocalRoots?: readonly string[];
+  allowedMentions?: DiscordAllowedMentions;
+  kind: "tool" | "block" | "final";
 }) {
   void params.runtime;
 
   const delivery = resolveDiscordDeliveryOptions(params);
-  const payloads = sanitizeDiscordFrontChannelReplyPayloads(params.replies);
+  const payloads = sanitizeDiscordFrontChannelReplyPayloads(params.replies, {
+    kind: params.kind,
+  }).map(formatDiscordReasoningPayload);
   if (payloads.length === 0) {
     return;
   }
@@ -196,6 +219,7 @@ export async function deliverDiscordReply(params: {
       cfg: params.cfg,
       token: params.token,
       rest: params.rest,
+      allowedMentions: params.allowedMentions,
     }),
     mediaAccess: delivery.mediaAccess,
     session: buildOutboundSessionContext({

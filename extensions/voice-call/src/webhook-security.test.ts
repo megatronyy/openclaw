@@ -1,5 +1,7 @@
+// Voice Call tests cover webhook security plugin behavior.
 import crypto from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { MAX_DATE_TIMESTAMP_MS } from "openclaw/plugin-sdk/number-runtime";
+import { describe, expect, it, vi } from "vitest";
 import {
   verifyPlivoWebhook,
   verifyTelnyxWebhook,
@@ -241,6 +243,34 @@ describe("skip verification request keys", () => {
       expect(second.isReplay).toBe(true);
     },
   );
+
+  it("does not keep replay keys whose expiry would exceed the Date range", () => {
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(MAX_DATE_TIMESTAMP_MS);
+    const verify = () =>
+      verifyTwilioWebhook(
+        {
+          headers: {},
+          rawBody: "CallSid=CS-overflow&CallStatus=completed",
+          url: "https://example.com/voice/webhook",
+          method: "POST" as const,
+        },
+        "token",
+        { skipVerification: true },
+      );
+
+    try {
+      const first = verify();
+      expect(first.ok).toBe(true);
+      expect(first.isReplay).not.toBe(true);
+
+      dateNow.mockReturnValue(Date.parse("2026-05-29T12:00:00.000Z"));
+      const second = verify();
+      expect(second.ok).toBe(true);
+      expect(second.isReplay).not.toBe(true);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
 });
 
 const verifiedReplayRequestCases: Array<{
@@ -356,6 +386,42 @@ describe("verifyPlivoWebhook", () => {
     );
 
     expectAcceptedWebhookVersion(result, "v3");
+  });
+
+  it("matches trusted proxies for Plivo when Node reports an IPv4-mapped remote address", () => {
+    const authToken = "test-auth-token";
+    const nonce = "nonce-ipv4-mapped-plivo";
+    const postBody = "CallUUID=uuid&CallStatus=in-progress&From=%2B15550000000";
+    const webhookUrl = "https://proxy.example.com/voice/webhook?flow=answer&callId=abc";
+
+    const signature = plivoV3Signature({
+      authToken,
+      urlWithQuery: webhookUrl,
+      postBody,
+      nonce,
+    });
+
+    const result = verifyPlivoWebhook(
+      {
+        headers: {
+          host: "localhost:3000",
+          "x-forwarded-proto": "https",
+          "x-forwarded-host": "proxy.example.com",
+          "x-plivo-signature-v3": signature,
+          "x-plivo-signature-v3-nonce": nonce,
+        },
+        rawBody: postBody,
+        url: "http://localhost:3000/voice/webhook?flow=answer&callId=abc",
+        method: "POST",
+        query: { flow: "answer", callId: "abc" },
+        remoteAddress: "::ffff:127.0.0.1",
+      },
+      authToken,
+      { trustForwardingHeaders: true, trustedProxyIPs: ["127.0.0.1"] },
+    );
+
+    expectAcceptedWebhookVersion(result, "v3");
+    expect(result.verificationUrl).toBe(webhookUrl);
   });
 
   it("rejects missing signatures", () => {
@@ -754,6 +820,34 @@ describe("verifyTwilioWebhook", () => {
       },
       authToken,
       { trustForwardingHeaders: true, trustedProxyIPs: ["203.0.113.10"] },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.verificationUrl).toBe(webhookUrl);
+  });
+
+  it("matches trusted proxies when Node reports an IPv4-mapped remote address", () => {
+    const authToken = "test-auth-token";
+    const postBody = "CallSid=CS123&CallStatus=completed&From=%2B15550000000";
+    const webhookUrl = "https://proxy.example.com/voice/webhook";
+
+    const signature = twilioSignature({ authToken, url: webhookUrl, postBody });
+
+    const result = verifyTwilioWebhook(
+      {
+        headers: {
+          host: "localhost:3000",
+          "x-forwarded-proto": "https",
+          "x-forwarded-host": "proxy.example.com",
+          "x-twilio-signature": signature,
+        },
+        rawBody: postBody,
+        url: "http://localhost:3000/voice/webhook",
+        method: "POST",
+        remoteAddress: "::ffff:127.0.0.1",
+      },
+      authToken,
+      { trustForwardingHeaders: true, trustedProxyIPs: ["127.0.0.1"] },
     );
 
     expect(result.ok).toBe(true);

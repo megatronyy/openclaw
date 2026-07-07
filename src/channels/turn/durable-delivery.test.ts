@@ -1,3 +1,4 @@
+// Durable delivery tests cover persisted channel turn delivery attempts and recovery.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -21,41 +22,54 @@ vi.mock("../message/send.js", async (importOriginal) => {
   };
 });
 
+import type { FinalizedMsgContext } from "../../auto-reply/templating.js";
 import {
   deliverInboundReplyWithMessageSendContext,
   resolveDurableInboundReplyToId,
 } from "./durable-delivery.js";
 
-function latestSendDurableMessageBatchRequest(): {
+type SendDurableMessageBatchRequest = {
   cfg?: unknown;
   channel?: string;
   to?: string;
   threadId?: string | number | null;
   durability?: string;
-} {
-  const [request] = mocks.sendDurableMessageBatch.mock.calls.at(-1) as unknown as [
-    {
-      cfg?: unknown;
-      channel?: string;
-      to?: string;
-      threadId?: string | number | null;
-      durability?: string;
+  requireUnknownSendReconciliation?: boolean;
+  gatewayClientScopes?: readonly string[];
+};
+
+type DeliverySupportRequest = {
+  requirements?: Record<string, boolean>;
+};
+
+function ctxPayload(overrides: Partial<FinalizedMsgContext>): FinalizedMsgContext {
+  return {
+    CommandAuthorized: true,
+    CommandTurn: {
+      kind: "normal" as const,
+      source: "message" as const,
+      authorized: false as const,
     },
-  ];
-  return request;
+    ...overrides,
+  };
 }
 
-function latestDeliverySupportRequest(): {
-  requirements?: Record<string, boolean>;
-} {
-  const [request] = mocks.resolveOutboundDurableFinalDeliverySupport.mock.calls.at(
-    -1,
-  ) as unknown as [
-    {
-      requirements?: Record<string, boolean>;
-    },
-  ];
-  return request;
+function latestSendDurableMessageBatchRequest(): SendDurableMessageBatchRequest {
+  const calls = mocks.sendDurableMessageBatch.mock.calls;
+  const request = calls[calls.length - 1]?.[0];
+  if (!request || typeof request !== "object") {
+    throw new Error("expected sendDurableMessageBatch request");
+  }
+  return request as SendDurableMessageBatchRequest;
+}
+
+function latestDeliverySupportRequest(): DeliverySupportRequest {
+  const calls = mocks.resolveOutboundDurableFinalDeliverySupport.mock.calls;
+  const request = calls[calls.length - 1]?.[0];
+  if (!request || typeof request !== "object") {
+    throw new Error("expected delivery support request");
+  }
+  return request as DeliverySupportRequest;
 }
 
 describe("durable inbound reply delivery", () => {
@@ -79,11 +93,10 @@ describe("durable inbound reply delivery", () => {
       resolveDurableInboundReplyToId({
         replyToId: null,
         payload: { text: "plain reply" },
-        ctxPayload: {
-          CommandAuthorized: true,
+        ctxPayload: ctxPayload({
           ReplyToIdFull: "context-full-reply",
           ReplyToId: "context-reply",
-        },
+        }),
       }),
     ).toBeNull();
   });
@@ -92,22 +105,20 @@ describe("durable inbound reply delivery", () => {
     expect(
       resolveDurableInboundReplyToId({
         payload: { text: "payload reply", replyToId: "payload-reply" },
-        ctxPayload: {
-          CommandAuthorized: true,
+        ctxPayload: ctxPayload({
           ReplyToIdFull: "context-full-reply",
           ReplyToId: "context-reply",
-        },
+        }),
       }),
     ).toBe("payload-reply");
 
     expect(
       resolveDurableInboundReplyToId({
         payload: { text: "context reply" },
-        ctxPayload: {
-          CommandAuthorized: true,
+        ctxPayload: ctxPayload({
           ReplyToIdFull: "context-full-reply",
           ReplyToId: "context-reply",
-        },
+        }),
       }),
     ).toBe("context-full-reply");
   });
@@ -120,11 +131,10 @@ describe("durable inbound reply delivery", () => {
       info: { kind: "final" },
       payload: { text: "plain reply" },
       threadId: null,
-      ctxPayload: {
-        CommandAuthorized: true,
+      ctxPayload: ctxPayload({
         OriginatingTo: "chat-1",
         MessageThreadId: "context-thread",
-      },
+      }),
     });
 
     expect(mocks.sendDurableMessageBatch).toHaveBeenCalledTimes(1);
@@ -134,6 +144,7 @@ describe("durable inbound reply delivery", () => {
     expect(request.to).toBe("chat-1");
     expect(request.threadId).toBeNull();
     expect(request.durability).toBe("best_effort");
+    expect(request.gatewayClientScopes).toEqual([]);
   });
 
   it("does not require unknown-send reconciliation for the default best-effort final path", async () => {
@@ -143,10 +154,9 @@ describe("durable inbound reply delivery", () => {
       agentId: "main",
       info: { kind: "final" },
       payload: { text: "final" },
-      ctxPayload: {
-        CommandAuthorized: true,
+      ctxPayload: ctxPayload({
         OriginatingTo: "chat-1",
-      },
+      }),
     });
 
     expect(mocks.resolveOutboundDurableFinalDeliverySupport).toHaveBeenCalledTimes(1);
@@ -156,6 +166,7 @@ describe("durable inbound reply delivery", () => {
     });
     expect(mocks.sendDurableMessageBatch).toHaveBeenCalledTimes(1);
     expect(latestSendDurableMessageBatchRequest().durability).toBe("best_effort");
+    expect(latestSendDurableMessageBatchRequest().requireUnknownSendReconciliation).toBeUndefined();
   });
 
   it("uses required durability when a caller explicitly requires unknown-send reconciliation", async () => {
@@ -169,10 +180,9 @@ describe("durable inbound reply delivery", () => {
         text: true,
         reconcileUnknownSend: true,
       },
-      ctxPayload: {
-        CommandAuthorized: true,
+      ctxPayload: ctxPayload({
         OriginatingTo: "chat-1",
-      },
+      }),
     });
 
     expect(mocks.resolveOutboundDurableFinalDeliverySupport).toHaveBeenCalledTimes(1);
@@ -182,6 +192,7 @@ describe("durable inbound reply delivery", () => {
     });
     expect(mocks.sendDurableMessageBatch).toHaveBeenCalledTimes(1);
     expect(latestSendDurableMessageBatchRequest().durability).toBe("required");
+    expect(latestSendDurableMessageBatchRequest().requireUnknownSendReconciliation).toBe(true);
   });
 
   it("reports durable partial send failures as failed delivery", async () => {
@@ -205,12 +216,12 @@ describe("durable inbound reply delivery", () => {
       agentId: "main",
       info: { kind: "final" },
       payload: { text: "final" },
-      ctxPayload: {
-        CommandAuthorized: true,
+      ctxPayload: ctxPayload({
         OriginatingTo: "chat-1",
-      },
+      }),
     });
 
-    expect(result).toEqual({ status: "failed", error });
+    expect(result).toEqual({ status: "failed", error, sentBeforeError: true });
+    expect(error).toMatchObject({ sentBeforeError: true, visibleReplySent: true });
   });
 });

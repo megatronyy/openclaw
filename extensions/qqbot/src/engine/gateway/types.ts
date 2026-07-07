@@ -1,3 +1,5 @@
+// Qqbot type declarations define plugin contracts.
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import type { EngineLogger } from "../types.js";
 export type { EngineLogger };
 
@@ -38,7 +40,7 @@ export interface GatewayPluginRuntime {
       resolveStorePath: (store: unknown, params: { agentId: string }) => string;
       recordInboundSession: (params: unknown) => Promise<unknown>;
     };
-    turn: {
+    inbound: {
       run: (params: unknown) => Promise<unknown>;
     };
     text: {
@@ -210,7 +212,7 @@ interface GatewayGroupOptions {
 export interface CoreGatewayContext {
   account: GatewayAccount;
   abortSignal: AbortSignal;
-  cfg: unknown;
+  cfg: OpenClawConfig;
   onReady?: (data: unknown) => void;
   /**
    * Invoked when a RESUMED event is received after reconnect.
@@ -219,6 +221,12 @@ export interface CoreGatewayContext {
    */
   onResumed?: (data: unknown) => void;
   onError?: (error: Error) => void;
+  /**
+   * Invoked when the gateway websocket closes or permanently stops
+   * (fatal close code / reconnect attempts exhausted). Without this the
+   * channel status keeps reporting the last `connected: true` snapshot.
+   */
+  onDisconnected?: (info: { reason?: string; fatal?: boolean }) => void;
   log?: EngineLogger;
   /** PluginRuntime injected by the framework — same object in both versions. */
   runtime: GatewayPluginRuntime;

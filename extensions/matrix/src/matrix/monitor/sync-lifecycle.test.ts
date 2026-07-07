@@ -1,3 +1,4 @@
+// Matrix tests cover sync lifecycle plugin behavior.
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { createMatrixMonitorStatusController } from "./status.js";
@@ -42,8 +43,10 @@ function statusCalls(setStatus: ReturnType<typeof vi.fn>): Record<string, unknow
 
 function lastStatus(setStatus: ReturnType<typeof vi.fn>): Record<string, unknown> {
   const status = statusCalls(setStatus).at(-1);
-  expect(status).toBeDefined();
-  return status ?? {};
+  if (!status) {
+    throw new Error("Expected monitor status");
+  }
+  return status;
 }
 
 function expectLastStatusFields(

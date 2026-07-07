@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+// Qqbot tests cover message queue plugin behavior.
+import { describe, expect, it, vi } from "vitest";
 import { createMessageQueue, mergeGroupMessages, type QueuedMessage } from "./message-queue.js";
 
 function groupMsg(overrides: Partial<QueuedMessage> = {}): QueuedMessage {
@@ -206,7 +207,9 @@ describe("engine/gateway/message-queue", () => {
         throw new Error("Expected QQBot queue gate callback to be initialized");
       }
       gate();
-      await new Promise((res) => setTimeout(res, 0));
+      await vi.waitFor(() => {
+        expect(seen.length).toBeGreaterThan(1);
+      });
       const seenIds = seen.map((m) => m.messageId);
       expect(seenIds).toContain("First");
       // The bot message should NOT have been processed — it was evicted.

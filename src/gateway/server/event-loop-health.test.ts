@@ -1,3 +1,4 @@
+// Event-loop health tests cover delay, CPU, and utilization degradation classification.
 import type { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -5,6 +6,9 @@ import {
   createGatewayEventLoopHealthMonitor,
 } from "./event-loop-health.js";
 
+/**
+ * Event-loop health regression tests for delay, CPU, and utilization signals.
+ */
 type CpuUsage = ReturnType<typeof process.cpuUsage>;
 type DelayMonitor = ReturnType<typeof monitorEventLoopDelay>;
 type EventLoopUtilization = ReturnType<typeof performance.eventLoopUtilization>;
@@ -79,13 +83,26 @@ function createMonitorHarness(params?: { cpuMsPerWallMs?: number; utilization?: 
 }
 
 function expectSnapshotFields(snapshot: unknown, expected: Record<string, unknown>) {
-  expect(typeof snapshot).toBe("object");
-  expect(snapshot).not.toBeNull();
+  if (!snapshot || typeof snapshot !== "object") {
+    throw new Error("expected event loop health snapshot");
+  }
   const actual = snapshot as Record<string, unknown>;
   for (const [key, value] of Object.entries(expected)) {
     expect(actual[key]).toEqual(value);
   }
   return actual;
+}
+
+function expectSaturatedLoadSnapshot(snapshot: unknown) {
+  return expectSnapshotFields(snapshot, {
+    degraded: true,
+    reasons: ["event_loop_utilization", "cpu"],
+    intervalMs: 1_000,
+    delayP99Ms: 30,
+    delayMaxMs: 0,
+    utilization: 1,
+    cpuCoreRatio: 1,
+  });
 }
 
 describe("classifyGatewayEventLoopHealthReasons", () => {
@@ -198,15 +215,7 @@ describe("createGatewayEventLoopHealthMonitor", () => {
     harness.setDelay({ p99Ms: 30 });
     harness.setNow(1_000);
 
-    expectSnapshotFields(harness.monitor.snapshot(), {
-      degraded: true,
-      reasons: ["event_loop_utilization", "cpu"],
-      intervalMs: 1_000,
-      delayP99Ms: 30,
-      delayMaxMs: 0,
-      utilization: 1,
-      cpuCoreRatio: 1,
-    });
+    expectSaturatedLoadSnapshot(harness.monitor.snapshot());
   });
 
   it("does not wait for the sustained sample window before reporting event-loop delay", () => {
@@ -267,15 +276,7 @@ describe("createGatewayEventLoopHealthMonitor", () => {
     expect(harness.monitor.snapshot()).toBe(first);
 
     harness.setNow(2_000);
-    expectSnapshotFields(harness.monitor.snapshot(), {
-      degraded: true,
-      reasons: ["event_loop_utilization", "cpu"],
-      intervalMs: 1_000,
-      delayP99Ms: 30,
-      delayMaxMs: 0,
-      utilization: 1,
-      cpuCoreRatio: 1,
-    });
+    expectSaturatedLoadSnapshot(harness.monitor.snapshot());
   });
 
   it("clears the cached snapshot when stopped", () => {
@@ -287,7 +288,7 @@ describe("createGatewayEventLoopHealthMonitor", () => {
     harness.setNow(1_250);
     harness.monitor.stop();
 
-    expect(harness.delayMonitor.disable).toHaveBeenCalledTimes(1);
+    expect(harness.delayMonitor["disable"]).toHaveBeenCalledTimes(1);
     expect(harness.monitor.snapshot()).toBeUndefined();
   });
 });

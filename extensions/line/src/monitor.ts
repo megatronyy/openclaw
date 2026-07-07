@@ -1,5 +1,6 @@
+// Line plugin module implements monitor behavior.
 import type { webhook } from "@line/bot-sdk";
-import { hasFinalChannelTurnDispatch } from "openclaw/plugin-sdk/channel-message";
+import { hasFinalInboundReplyDispatch } from "openclaw/plugin-sdk/channel-inbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { chunkMarkdownText } from "openclaw/plugin-sdk/reply-runtime";
 import {
@@ -11,6 +12,7 @@ import {
 import {
   isRequestBodyLimitError,
   normalizePluginHttpPath,
+  normalizeWebhookPath,
   registerWebhookTargetWithPluginRoute,
   requestBodyErrorToText,
   resolveSingleWebhookTarget,
@@ -173,15 +175,6 @@ export async function monitorLineProvider(
     throw new Error("LINE webhook mode requires a non-empty channel secret.");
   }
 
-  recordChannelRuntimeState({
-    channel: "line",
-    accountId: resolvedAccountId,
-    state: {
-      running: true,
-      lastStartAt: Date.now(),
-    },
-  });
-
   const bot = createLineBot({
     channelAccessToken: token,
     channelSecret: secret,
@@ -224,7 +217,7 @@ export async function monitorLineProvider(
         const textLimit = 5000;
         let replyTokenUsed = false;
         const core = getLineRuntime();
-        const turnResult = await core.channel.turn.run({
+        const turnResult = await core.channel.inbound.run({
           channel: "line",
           accountId: route.accountId,
           raw: ctx,
@@ -265,7 +258,7 @@ export async function monitorLineProvider(
                     }).catch(() => {});
                   }
 
-                  const { replyTokenUsed: nextReplyTokenUsed } = await deliverLineAutoReply({
+                  const deliveryResult = await deliverLineAutoReply({
                     payload,
                     lineData,
                     to: ctxPayload.From,
@@ -295,7 +288,16 @@ export async function monitorLineProvider(
                       },
                     },
                   });
-                  replyTokenUsed = nextReplyTokenUsed;
+                  replyTokenUsed = deliveryResult.replyTokenUsed;
+
+                  if (deliveryResult.status === "partial") {
+                    // Text reached the user but a rich/media bubble did not.
+                    // Surface the tagged partial failure after adopting the
+                    // consumed reply-token state so later blocks in this turn
+                    // route correctly; recordChannelRuntimeState is skipped
+                    // because this delivery was not a clean success.
+                    throw deliveryResult.error;
+                  }
 
                   recordChannelRuntimeState({
                     channel: "line",
@@ -313,7 +315,7 @@ export async function monitorLineProvider(
           },
         });
         const dispatchResult = turnResult.dispatched ? turnResult.dispatchResult : undefined;
-        if (!hasFinalChannelTurnDispatch(dispatchResult)) {
+        if (!hasFinalInboundReplyDispatch(dispatchResult)) {
           logVerbose(`line: no response generated for message from ${ctxPayload.From}`);
         }
       } catch (err) {
@@ -336,7 +338,9 @@ export async function monitorLineProvider(
     },
   });
 
-  const normalizedPath = normalizePluginHttpPath(webhookPath, "/line/webhook") ?? "/line/webhook";
+  const normalizedPath = normalizeWebhookPath(
+    normalizePluginHttpPath(webhookPath, "/line/webhook") ?? "/line/webhook",
+  );
   const createScopedLineWebhookHandler = (target: LineWebhookTarget) =>
     createLineNodeWebhookHandler({
       channelSecret: target.channelSecret,
@@ -429,15 +433,20 @@ export async function monitorLineProvider(
           }
 
           requestLifecycle.release();
-
-          if (body.events && body.events.length > 0) {
-            logVerbose(`line: received ${body.events.length} webhook events`);
-            await match.target.bot.handleWebhook(body);
-          }
-
           res.statusCode = 200;
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ status: "ok" }));
+
+          if (body.events && body.events.length > 0) {
+            logVerbose(`line: received ${body.events.length} webhook events`);
+            void Promise.resolve()
+              .then(() => match.target.bot.handleWebhook(body))
+              .catch((err: unknown) => {
+                match.target.runtime.error?.(
+                  danger(`line webhook dispatch failed: ${String(err)}`),
+                );
+              });
+          }
         } catch (err) {
           if (isRequestBodyLimitError(err, "PAYLOAD_TOO_LARGE")) {
             res.statusCode = 413;
@@ -461,6 +470,15 @@ export async function monitorLineProvider(
           requestLifecycle.release();
         }
       },
+    },
+  });
+
+  recordChannelRuntimeState({
+    channel: "line",
+    accountId: resolvedAccountId,
+    state: {
+      running: true,
+      lastStartAt: Date.now(),
     },
   });
 

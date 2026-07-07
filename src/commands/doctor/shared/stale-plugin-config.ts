@@ -1,11 +1,13 @@
+// Doctor scanner and repair for plugin/channel config that references missing plugins.
+import { sanitizeForLog } from "../../../../packages/terminal-core/src/ansi.js";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../../agents/agent-scope.js";
 import { CHANNEL_IDS } from "../../../channels/ids.js";
+import { shouldSuppressMissingCodexPluginDiagnostics } from "../../../config/codex-plugin-diagnostics.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { normalizePluginId } from "../../../plugins/config-state.js";
 import { loadInstalledPluginIndexInstallRecordsSync } from "../../../plugins/installed-plugin-index-records.js";
 import { loadManifestMetadataSnapshot } from "../../../plugins/manifest-contract-eligibility.js";
 import { defaultSlotIdForKey, type PluginSlotKey } from "../../../plugins/slots.js";
-import { sanitizeForLog } from "../../../terminal/ansi.js";
 import { asObjectRecord } from "./object.js";
 
 const CHANNEL_CONFIG_META_KEYS = new Set(["defaults", "modelByChannel"]);
@@ -78,6 +80,7 @@ function collectPluginRegistryState(
   };
 }
 
+/** Return true when plugin discovery errors should pause stale-plugin auto-removal. */
 export function isStalePluginAutoRepairBlocked(
   cfg: OpenClawConfig,
   env?: NodeJS.ProcessEnv,
@@ -88,6 +91,7 @@ export function isStalePluginAutoRepairBlocked(
   return collectPluginRegistryState(cfg, env).hasDiscoveryErrors;
 }
 
+/** Scan plugin/channel config surfaces for ids no longer present in manifests or installs. */
 export function scanStalePluginConfig(
   cfg: OpenClawConfig,
   env?: NodeJS.ProcessEnv,
@@ -146,6 +150,9 @@ function scanStalePluginConfigWithState(
     for (const rawPluginId of Object.keys(entries)) {
       const pluginId = normalizePluginId(rawPluginId);
       if (!pluginId || knownIds.has(pluginId) || registryState.knownChannelIds.has(pluginId)) {
+        continue;
+      }
+      if (pluginId === "codex" && shouldSuppressMissingCodexPluginDiagnostics(cfg)) {
         continue;
       }
       hits.push({
@@ -249,7 +256,8 @@ function collectDependentChannelConfigHits(
       surface: "heartbeat",
     });
   }
-  for (const [index, agent] of (cfg.agents?.list ?? []).entries()) {
+  const agents = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
+  for (const [index, agent] of agents.entries()) {
     const target = agent?.heartbeat?.target;
     if (typeof target !== "string" || !staleChannelIds.has(normalizePluginId(target))) {
       continue;
@@ -300,6 +308,7 @@ function formatStalePluginHitWarning(hit: StalePluginConfigHit): string {
   return `- ${hit.pathLabel}: model override references missing channel plugin "${hit.pluginId}".`;
 }
 
+/** Format warnings for stale plugin config hits. */
 export function collectStalePluginConfigWarnings(params: {
   hits: StalePluginConfigHit[];
   doctorFixCommand: string;
@@ -321,9 +330,11 @@ export function collectStalePluginConfigWarnings(params: {
   return lines.map((line) => sanitizeForLog(line));
 }
 
+/** Remove stale plugin ids and dangling channel references when discovery is healthy. */
 export function maybeRepairStalePluginConfig(
   cfg: OpenClawConfig,
   env?: NodeJS.ProcessEnv,
+  params?: { preservePluginIds?: Iterable<string> },
 ): {
   config: OpenClawConfig;
   changes: string[];
@@ -336,7 +347,14 @@ export function maybeRepairStalePluginConfig(
     return { config: cfg, changes: [] };
   }
 
-  const hits = scanStalePluginConfigWithState(cfg, registryState);
+  const preservePluginIds = new Set(
+    [...(params?.preservePluginIds ?? [])]
+      .map((pluginId) => normalizePluginId(pluginId))
+      .filter((pluginId): pluginId is string => Boolean(pluginId)),
+  );
+  const hits = scanStalePluginConfigWithState(cfg, registryState).filter(
+    (hit) => !preservePluginIds.has(normalizePluginId(hit.pluginId)),
+  );
   if (hits.length === 0) {
     return { config: cfg, changes: [] };
   }
@@ -476,7 +494,8 @@ function removeDanglingChannelReferences(config: OpenClawConfig, channelIds: rea
   ) {
     delete defaultsHeartbeat.target;
   }
-  for (const agent of config.agents?.list ?? []) {
+  const agents = Array.isArray(config.agents?.list) ? config.agents.list : [];
+  for (const agent of agents) {
     const heartbeat = agent.heartbeat;
     if (
       heartbeat &&

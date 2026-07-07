@@ -1,9 +1,10 @@
+// Tests fatal unhandled rejection detection in process bootstrap.
 import process from "node:process";
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 
 const restoreTerminalStateMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../terminal/restore.js", () => ({
+vi.mock("../../packages/terminal-core/src/restore.js", () => ({
   restoreTerminalState: restoreTerminalStateMock,
 }));
 
@@ -121,13 +122,18 @@ describe("installUnhandledRejectionHandler - fatal detection", () => {
   });
 
   describe("configuration errors", () => {
-    it("exits on configuration error codes", () => {
-      const configurationCases = [
-        { code: "INVALID_CONFIG", message: "Invalid config" },
-        { code: "MISSING_API_KEY", message: "Missing API key" },
-      ] as const;
+    it("uses exit 78 only for invalid configuration", () => {
+      expectExitCodeFromUnhandled(
+        Object.assign(new Error("Invalid config"), { code: "INVALID_CONFIG" }),
+        [78],
+        "configuration error",
+      );
 
-      for (const { code, message } of configurationCases) {
+      const transientCredentialCases = [
+        { code: "MISSING_API_KEY", message: "Missing API key" },
+        { code: "MISSING_CREDENTIALS", message: "Missing credentials" },
+      ] as const;
+      for (const { code, message } of transientCredentialCases) {
         expectExitCodeFromUnhandled(
           Object.assign(new Error(message), { code }),
           [1],
@@ -150,6 +156,9 @@ describe("installUnhandledRejectionHandler - fatal detection", () => {
           cause: { code: "UND_ERR_CONNECT_TIMEOUT", syscall: "connect" },
         }),
         Object.assign(new Error("DNS resolve failed"), { code: "UND_ERR_DNS_RESOLVE_FAILED" }),
+        Object.assign(new Error("connect ENETDOWN 149.154.167.220:443"), {
+          code: "ENETDOWN",
+        }),
         Object.assign(new Error("Connection reset"), { code: "ECONNRESET" }),
         Object.assign(new Error("Timeout"), { code: "ETIMEDOUT" }),
         Object.assign(

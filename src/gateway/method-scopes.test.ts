@@ -1,3 +1,6 @@
+/**
+ * Gateway method-scope policy tests.
+ */
 import { afterEach, describe, expect, it } from "vitest";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
@@ -6,19 +9,28 @@ import {
   isGatewayMethodClassified,
   resolveLeastPrivilegeOperatorScopesForMethod,
 } from "./method-scopes.js";
+import { createPluginGatewayMethodDescriptor } from "./methods/registry.js";
 import { listGatewayMethods } from "./server-methods-list.js";
 import { coreGatewayHandlers } from "./server-methods.js";
+import type { GatewayRequestHandler } from "./server-methods/types.js";
 
 const RESERVED_ADMIN_PLUGIN_METHOD = "config.plugin.inspect";
+const pluginHandler: GatewayRequestHandler = ({ respond }) => respond(true, {});
 
 function setPluginGatewayMethodScope(
   method: string,
   scope: "operator.read" | "operator.write" | "operator.admin",
 ) {
   const registry = createEmptyPluginRegistry();
-  registry.gatewayMethodScopes = {
-    [method]: scope,
-  };
+  registry.gatewayHandlers[method] = pluginHandler;
+  registry.gatewayMethodDescriptors.push(
+    createPluginGatewayMethodDescriptor({
+      pluginId: "test",
+      name: method,
+      handler: pluginHandler,
+      scope,
+    }),
+  );
   setActivePluginRegistry(registry);
 }
 
@@ -30,6 +42,7 @@ describe("method scope resolution", () => {
   it.each([
     ["sessions.resolve", ["operator.read"]],
     ["tasks.list", ["operator.read"]],
+    ["audit.list", ["operator.read"]],
     ["tasks.get", ["operator.read"]],
     ["config.schema.lookup", ["operator.read"]],
     ["sessions.create", ["operator.write"]],
@@ -40,12 +53,15 @@ describe("method scope resolution", () => {
     ["sessions.messages.subscribe", ["operator.read"]],
     ["sessions.messages.unsubscribe", ["operator.read"]],
     ["environments.list", ["operator.read"]],
+    ["worktrees.list", ["operator.read"]],
+    ["worktrees.create", ["operator.admin"]],
     ["environments.status", ["operator.read"]],
     ["diagnostics.stability", ["operator.read"]],
     ["node.pair.approve", ["operator.pairing"]],
     ["poll", ["operator.write"]],
     ["talk.client.create", ["operator.write"]],
     ["talk.client.toolCall", ["operator.write"]],
+    ["talk.client.steer", ["operator.write"]],
     ["talk.session.create", ["operator.write"]],
     ["talk.session.join", ["operator.write"]],
     ["talk.session.appendAudio", ["operator.write"]],
@@ -54,12 +70,18 @@ describe("method scope resolution", () => {
     ["talk.session.cancelTurn", ["operator.write"]],
     ["talk.session.cancelOutput", ["operator.write"]],
     ["talk.session.submitToolResult", ["operator.write"]],
+    ["talk.session.steer", ["operator.write"]],
     ["talk.session.close", ["operator.write"]],
     ["update.status", ["operator.admin"]],
+    ["config.schema", ["operator.admin"]],
     ["config.patch", ["operator.admin"]],
     ["nativeHook.invoke", ["operator.admin"]],
     ["wizard.start", ["operator.admin"]],
     ["update.run", ["operator.admin"]],
+    ["exec.approvals.get", ["operator.admin"]],
+    ["exec.approvals.set", ["operator.admin"]],
+    ["exec.approvals.node.get", ["operator.admin"]],
+    ["exec.approvals.node.set", ["operator.admin"]],
   ])("resolves least-privilege scopes for %s", (method, expected) => {
     expect(resolveLeastPrivilegeOperatorScopesForMethod(method)).toEqual(expected);
   });
@@ -159,6 +181,68 @@ describe("method scope resolution", () => {
     ).toEqual({ allowed: false, missingScope: "operator.approvals" });
   });
 
+  it("resolves sessions.patch to write scope for chat-organization fields only", () => {
+    expect(
+      resolveLeastPrivilegeOperatorScopesForMethod("sessions.patch", {
+        key: "agent:main:ios-1",
+        label: "Trip planning",
+        pinned: true,
+        archived: false,
+      }),
+    ).toEqual(["operator.write"]);
+    expect(
+      resolveLeastPrivilegeOperatorScopesForMethod("sessions.patch", {
+        key: "agent:main:ios-1",
+        agentId: "main",
+        category: "Travel",
+        unread: true,
+      }),
+    ).toEqual(["operator.write"]);
+    expect(isGatewayMethodClassified("sessions.patch")).toBe(true);
+  });
+
+  it.each([
+    ["model", { key: "agent:main:ios-1", model: "anthropic/claude-sonnet-5" }],
+    ["sendPolicy", { key: "agent:main:ios-1", sendPolicy: "deny" }],
+    ["inheritedToolAllow", { key: "agent:main:ios-1", inheritedToolAllow: ["exec"] }],
+    ["spawnedBy", { key: "agent:main:ios-1", spawnedBy: "agent:main:main" }],
+    ["mixed with safe fields", { key: "agent:main:ios-1", label: "x", execHost: "node-1" }],
+    ["unknown fields", { key: "agent:main:ios-1", futureField: true }],
+  ])("keeps sessions.patch admin-only when params include %s", (_name, params) => {
+    expect(resolveLeastPrivilegeOperatorScopesForMethod("sessions.patch", params)).toEqual([
+      "operator.admin",
+    ]);
+    expect(authorizeOperatorScopesForMethod("sessions.patch", ["operator.write"], params)).toEqual({
+      allowed: false,
+      missingScope: "operator.admin",
+    });
+    expect(authorizeOperatorScopesForMethod("sessions.patch", ["operator.admin"], params)).toEqual({
+      allowed: true,
+    });
+  });
+
+  it("authorizes write-scoped sessions.patch for chat-organization fields and denies read scope", () => {
+    const params = { key: "agent:main:ios-1", label: "Trip planning", pinned: true };
+    expect(authorizeOperatorScopesForMethod("sessions.patch", ["operator.write"], params)).toEqual({
+      allowed: true,
+    });
+    expect(authorizeOperatorScopesForMethod("sessions.patch", ["operator.read"], params)).toEqual({
+      allowed: false,
+      missingScope: "operator.write",
+    });
+  });
+
+  it("lets malformed sessions.patch params through to handler validation at write scope", () => {
+    // Malformed params cannot mutate anything; the handler rejects them with a
+    // precise validation error instead of a misleading missing-scope error.
+    expect(authorizeOperatorScopesForMethod("sessions.patch", ["operator.write"])).toEqual({
+      allowed: true,
+    });
+    expect(resolveLeastPrivilegeOperatorScopesForMethod("sessions.patch")).toEqual([
+      "operator.write",
+    ]);
+  });
+
   it("falls back to broad operator scopes when a dynamic session action is not locally registered", () => {
     expect(
       resolveLeastPrivilegeOperatorScopesForMethod("plugins.sessionAction", {
@@ -183,9 +267,15 @@ describe("method scope resolution", () => {
 
   it("reads plugin-registered gateway method scopes from the active plugin registry", () => {
     const registry = createEmptyPluginRegistry();
-    registry.gatewayMethodScopes = {
-      "browser.request": "operator.admin",
-    };
+    registry.gatewayHandlers["browser.request"] = pluginHandler;
+    registry.gatewayMethodDescriptors.push(
+      createPluginGatewayMethodDescriptor({
+        pluginId: "browser",
+        name: "browser.request",
+        handler: pluginHandler,
+        scope: "operator.admin",
+      }),
+    );
     setActivePluginRegistry(registry);
 
     expect(resolveLeastPrivilegeOperatorScopesForMethod("browser.request")).toEqual([
@@ -207,6 +297,7 @@ describe("operator scope authorization", () => {
     ["health", ["operator.read"], { allowed: true }],
     ["health", ["operator.write"], { allowed: true }],
     ["config.schema.lookup", ["operator.read"], { allowed: true }],
+    ["config.schema", ["operator.read"], { allowed: false, missingScope: "operator.admin" }],
     ["config.patch", ["operator.admin"], { allowed: true }],
   ])("authorizes %s for scopes %j", (method, scopes, expected) => {
     expect(authorizeOperatorScopesForMethod(method, scopes)).toEqual(expected);
@@ -223,6 +314,7 @@ describe("operator scope authorization", () => {
     for (const method of [
       "talk.client.create",
       "talk.client.toolCall",
+      "talk.client.steer",
       "talk.session.create",
       "talk.session.join",
       "talk.session.appendAudio",
@@ -231,6 +323,7 @@ describe("operator scope authorization", () => {
       "talk.session.cancelTurn",
       "talk.session.cancelOutput",
       "talk.session.submitToolResult",
+      "talk.session.steer",
       "talk.session.close",
     ]) {
       expect(authorizeOperatorScopesForMethod(method, ["operator.write"])).toEqual({
@@ -277,6 +370,21 @@ describe("operator scope authorization", () => {
       });
     },
   );
+
+  it.each([
+    "exec.approvals.get",
+    "exec.approvals.set",
+    "exec.approvals.node.get",
+    "exec.approvals.node.set",
+  ])("requires admin scope for exec approval policy method %s", (method) => {
+    expect(authorizeOperatorScopesForMethod(method, ["operator.approvals"])).toEqual({
+      allowed: false,
+      missingScope: "operator.admin",
+    });
+    expect(authorizeOperatorScopesForMethod(method, ["operator.admin"])).toEqual({
+      allowed: true,
+    });
+  });
 
   it.each([
     "plugin.approval.list",
@@ -348,6 +456,37 @@ describe("core gateway method classification", () => {
       (method) => !isGatewayMethodClassified(method),
     );
     expect(unclassified).toStrictEqual([]);
+  });
+
+  it("exposes skill proposal methods through the core gateway registry", () => {
+    for (const method of ["skills.proposals.list", "skills.proposals.inspect"]) {
+      expect(listGatewayMethods()).toContain(method);
+      expect(coreGatewayHandlers).toHaveProperty(method);
+      expect(resolveLeastPrivilegeOperatorScopesForMethod(method)).toEqual(["operator.read"]);
+      expect(authorizeOperatorScopesForMethod(method, ["operator.read"])).toEqual({
+        allowed: true,
+      });
+    }
+
+    for (const method of [
+      "skills.proposals.create",
+      "skills.proposals.update",
+      "skills.proposals.revise",
+      "skills.proposals.apply",
+      "skills.proposals.reject",
+      "skills.proposals.quarantine",
+    ]) {
+      expect(listGatewayMethods()).toContain(method);
+      expect(coreGatewayHandlers).toHaveProperty(method);
+      expect(resolveLeastPrivilegeOperatorScopesForMethod(method)).toEqual(["operator.admin"]);
+      expect(authorizeOperatorScopesForMethod(method, ["operator.write"])).toEqual({
+        allowed: false,
+        missingScope: "operator.admin",
+      });
+      expect(authorizeOperatorScopesForMethod(method, ["operator.admin"])).toEqual({
+        allowed: true,
+      });
+    }
   });
 });
 

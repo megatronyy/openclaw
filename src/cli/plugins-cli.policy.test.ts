@@ -1,3 +1,4 @@
+// Plugins CLI policy tests cover plugin command policy checks and warnings.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import {
@@ -15,7 +16,6 @@ const ORIGINAL_OPENCLAW_NIX_MODE = process.env.OPENCLAW_NIX_MODE;
 
 describe("plugins cli policy mutations", () => {
   const compatibilityPluginIds = [
-    { alias: "openai-codex", pluginId: "openai" },
     { alias: "google-gemini-cli", pluginId: "google" },
     { alias: "minimax-portal-auth", pluginId: "minimax" },
   ] as const;
@@ -42,7 +42,11 @@ describe("plugins cli policy mutations", () => {
   }
 
   function requireFirstWrittenConfig(): OpenClawConfig {
-    const [config] = writeConfigFile.mock.calls[0] ?? [];
+    const call = writeConfigFile.mock.calls[0];
+    if (!call) {
+      throw new Error("expected writeConfigFile to be called");
+    }
+    const [config] = call;
     if (!config) {
       throw new Error("expected writeConfigFile to receive a config");
     }

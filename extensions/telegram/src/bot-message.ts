@@ -1,3 +1,4 @@
+// Telegram plugin module implements bot message behavior.
 import type { ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
 import type { TelegramAccountConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
@@ -16,6 +17,11 @@ import {
 import type { TelegramMessageContextOptions } from "./bot-message-context.types.js";
 import type { TelegramPromptContextEntry } from "./bot-message-context.types.js";
 import { dispatchTelegramMessage } from "./bot-message-dispatch.js";
+import {
+  isTelegramSpooledReplayUpdate,
+  recordTelegramMessageProcessingResult,
+  type TelegramMessageProcessingResult,
+} from "./bot-processing-outcome.js";
 import type { TelegramBotOptions } from "./bot.types.js";
 import { buildTelegramThreadParams } from "./bot/helpers.js";
 import type { TelegramContext, TelegramStreamMode } from "./bot/types.js";
@@ -47,6 +53,10 @@ type TelegramMessageProcessorDeps = Omit<
   opts: Pick<TelegramBotOptions, "token">;
 };
 
+export type TelegramMessageProcessorLifecycle = {
+  onDispatchStart?: () => Promise<void> | void;
+};
+
 export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDeps) => {
   const {
     bot,
@@ -72,6 +82,35 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
     telegramDeps,
     opts,
   } = deps;
+  const sessionRuntime = {
+    ...(telegramDeps.buildChannelInboundEventContext
+      ? { buildChannelInboundEventContext: telegramDeps.buildChannelInboundEventContext }
+      : {}),
+    ...(telegramDeps.readSessionUpdatedAt
+      ? { readSessionUpdatedAt: telegramDeps.readSessionUpdatedAt }
+      : {}),
+    ...(telegramDeps.readAmbientTranscriptWatermark
+      ? { readAmbientTranscriptWatermark: telegramDeps.readAmbientTranscriptWatermark }
+      : {}),
+    ...(telegramDeps.recordInboundSession
+      ? { recordInboundSession: telegramDeps.recordInboundSession }
+      : {}),
+    ...(telegramDeps.resolveAmbientTranscriptWatermarkKey
+      ? { resolveAmbientTranscriptWatermarkKey: telegramDeps.resolveAmbientTranscriptWatermarkKey }
+      : {}),
+    ...(telegramDeps.resolveInboundLastRouteSessionKey
+      ? { resolveInboundLastRouteSessionKey: telegramDeps.resolveInboundLastRouteSessionKey }
+      : {}),
+    ...(telegramDeps.resolvePinnedMainDmOwnerFromAllowlist
+      ? {
+          resolvePinnedMainDmOwnerFromAllowlist: telegramDeps.resolvePinnedMainDmOwnerFromAllowlist,
+        }
+      : {}),
+    resolveStorePath: telegramDeps.resolveStorePath,
+  };
+  const contextRuntime = telegramDeps.recordChannelActivity
+    ? { recordChannelActivity: telegramDeps.recordChannelActivity }
+    : undefined;
 
   return async (
     primaryCtx: TelegramContext,
@@ -81,6 +120,7 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
     replyMedia?: TelegramMediaRef[],
     replyChain?: TelegramReplyChainEntry[],
     promptContext?: TelegramPromptContextEntry[],
+    lifecycle?: TelegramMessageProcessorLifecycle,
   ) => {
     const ingressReceivedAtMs =
       typeof options?.receivedAtMs === "number" && Number.isFinite(options.receivedAtMs)
@@ -89,6 +129,12 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
     const ingressDebugEnabled =
       shouldLogVerbose() || process.env.OPENCLAW_DEBUG_TELEGRAM_INGRESS === "1";
     const ingressContextStartMs = ingressReceivedAtMs ? Date.now() : undefined;
+    const recordCurrentUpdateProcessingResult = (result: TelegramMessageProcessingResult) => {
+      if (options?.spooledReplay === true) {
+        return;
+      }
+      recordTelegramMessageProcessingResult(result);
+    };
     const context = await buildTelegramMessageContext({
       primaryCtx,
       allMedia,
@@ -112,6 +158,8 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
       resolveTelegramGroupConfig,
       sendChatActionHandler,
       loadFreshConfig,
+      runtime: contextRuntime,
+      sessionRuntime,
       upsertPairingRequest: telegramDeps.upsertChannelPairingRequest,
     });
     if (!context) {
@@ -121,7 +169,9 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
             (options?.ingressBuffer ? ` buffer=${options.ingressBuffer}` : ""),
         );
       }
-      return;
+      const result: TelegramMessageProcessingResult = { kind: "skipped" };
+      recordCurrentUpdateProcessingResult(result);
+      return result;
     }
     if (ingressDebugEnabled && ingressReceivedAtMs && ingressContextStartMs) {
       logVerbose(
@@ -130,9 +180,14 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
           (options?.ingressBuffer ? ` buffer=${options.ingressBuffer}` : ""),
       );
     }
-    void context.sendTyping().catch((err) => {
-      logVerbose(`telegram early typing cue failed for chat ${context.chatId}: ${String(err)}`);
-    });
+    if (
+      context.ctxPayload.InboundEventKind !== "room_event" &&
+      context.initialTypingCueSent !== true
+    ) {
+      void context.sendTyping().catch((err: unknown) => {
+        logVerbose(`telegram early typing cue failed for chat ${context.chatId}: ${String(err)}`);
+      });
+    }
     telegramInboundLog.info(
       formatTelegramInboundLogLine({
         from: context.ctxPayload.From,
@@ -144,8 +199,11 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
         mediaType: allMedia[0]?.contentType,
       }),
     );
+    await lifecycle?.onDispatchStart?.();
+    const spooledReplay =
+      options?.spooledReplay === true || isTelegramSpooledReplayUpdate(primaryCtx.update);
     try {
-      await dispatchTelegramMessage({
+      const dispatchResult = await dispatchTelegramMessage({
         context,
         bot,
         cfg,
@@ -156,22 +214,43 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
         telegramCfg,
         telegramDeps,
         opts,
+        retryDispatchErrors: spooledReplay,
+        suppressFailureFallback: spooledReplay,
       });
+      if (dispatchResult?.kind === "failed-retryable") {
+        const result: TelegramMessageProcessingResult = {
+          kind: "failed-retryable",
+          error: dispatchResult.error,
+        };
+        recordCurrentUpdateProcessingResult(result);
+        return result;
+      }
       if (ingressDebugEnabled && ingressReceivedAtMs) {
         logVerbose(
           `telegram ingress: chatId=${context.chatId} dispatchCompleteMs=${Date.now() - ingressReceivedAtMs}` +
             (options?.ingressBuffer ? ` buffer=${options.ingressBuffer}` : ""),
         );
       }
+      const result: TelegramMessageProcessingResult = { kind: "completed" };
+      recordCurrentUpdateProcessingResult(result);
+      return result;
     } catch (err) {
       runtime.error?.(danger(`telegram message processing failed: ${String(err)}`));
-      try {
-        await bot.api.sendMessage(
-          context.chatId,
-          "Something went wrong while processing your request. Please try again.",
-          buildTelegramThreadParams(context.threadSpec),
-        );
-      } catch {}
+      if (!spooledReplay) {
+        try {
+          await bot.api.sendMessage(
+            context.chatId,
+            "Something went wrong while processing your request. Please try again.",
+            buildTelegramThreadParams(context.threadSpec),
+          );
+        } catch {}
+      }
+      const result: TelegramMessageProcessingResult = {
+        kind: "failed-retryable",
+        error: err,
+      };
+      recordCurrentUpdateProcessingResult(result);
+      return result;
     }
   };
 };

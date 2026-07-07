@@ -1,4 +1,6 @@
+// Google tests cover realtime voice provider plugin behavior.
 import { REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ } from "openclaw/plugin-sdk/realtime-voice";
+import type { RealtimeVoiceTool } from "openclaw/plugin-sdk/realtime-voice";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildGoogleRealtimeVoiceProvider } from "./realtime-voice-provider.js";
 
@@ -21,17 +23,21 @@ type MockGoogleLiveConnectParams = {
 };
 
 const { connectMock, createTokenMock, session } = vi.hoisted(() => {
-  const session: MockGoogleLiveSession = {
+  const sessionValue: MockGoogleLiveSession = {
     close: vi.fn(),
     sendClientContent: vi.fn(),
     sendRealtimeInput: vi.fn(),
     sendToolResponse: vi.fn(),
   };
-  const connectMock = vi.fn(async (_params: MockGoogleLiveConnectParams) => session);
-  const createTokenMock = vi.fn(async (_params: unknown) => ({
+  const connectMockLocal = vi.fn(async (_params: MockGoogleLiveConnectParams) => sessionValue);
+  const createTokenMockLocal = vi.fn(async (_params: unknown) => ({
     name: "auth_tokens/browser-session",
   }));
-  return { connectMock, createTokenMock, session };
+  return {
+    connectMock: connectMockLocal,
+    createTokenMock: createTokenMockLocal,
+    session: sessionValue,
+  };
 });
 
 vi.mock("./google-genai-runtime.js", () => ({
@@ -59,8 +65,59 @@ function lastConnectParams(): MockGoogleLiveConnectParams {
 
 function sentAudio(index = 0): { data?: unknown; mimeType?: unknown } {
   const audio = session.sendRealtimeInput.mock.calls[index]?.[0]?.audio;
-  expect(audio).toBeDefined();
+  if (!audio) {
+    throw new Error(`Expected sent audio at index ${index}`);
+  }
   return audio as { data?: unknown; mimeType?: unknown };
+}
+
+function requireFirstMockArg(mock: ReturnType<typeof vi.fn>, label: string): unknown {
+  const [call] = mock.mock.calls;
+  if (!call) {
+    throw new Error(`expected ${label}`);
+  }
+  return call[0];
+}
+
+function requireFirstError(mock: ReturnType<typeof vi.fn>): { message?: string } {
+  const error = requireFirstMockArg(mock, "Google Live error");
+  if (!error || typeof error !== "object" || Array.isArray(error)) {
+    throw new Error("expected Google Live error");
+  }
+  return error as { message?: string };
+}
+
+function requireFirstAudio(mock: ReturnType<typeof vi.fn>): unknown {
+  return requireFirstMockArg(mock, "Google Live audio");
+}
+
+function createRealtimeTool(name: string): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name,
+    description: "Contract test tool",
+    parameters: { type: "object", properties: {} },
+  };
+}
+
+function createUnreadableToolName(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    get name(): string {
+      throw new Error("unreadable tool name");
+    },
+    description: "Contract test tool",
+    parameters: { type: "object", properties: {} },
+  };
+}
+
+function createMalformedToolName(name: unknown): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name,
+    description: "Contract test tool",
+    parameters: { type: "object", properties: {} },
+  } as unknown as RealtimeVoiceTool;
 }
 
 describe("buildGoogleRealtimeVoiceProvider", () => {
@@ -78,6 +135,7 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     for (const key of ENV_KEYS) {
       const value = envSnapshot[key];
       if (value === undefined) {
@@ -108,6 +166,7 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
       ],
       supportsBrowserSession: true,
       supportsBargeIn: true,
+      handlesInputAudioBargeIn: true,
       supportsToolCalls: true,
       supportsVideoFrames: true,
       supportsSessionResumption: true,
@@ -233,7 +292,7 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
           behavior?: string;
           description?: string;
           name?: string;
-          parametersJsonSchema?: unknown;
+          parameters?: unknown;
         }>;
       }>;
     };
@@ -255,7 +314,7 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     const declarations = config.tools?.[0]?.functionDeclarations ?? [];
     expect(declarations[0]?.name).toBe("lookup");
     expect(declarations[0]?.description).toBe("Look something up");
-    expect(declarations[0]?.parametersJsonSchema).toEqual({
+    expect(declarations[0]?.parameters).toEqual({
       type: "object",
       properties: {
         query: { type: "string" },
@@ -264,7 +323,7 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     });
     expect(declarations[1]?.name).toBe("openclaw_agent_consult");
     expect(declarations[1]?.description).toBe("Ask OpenClaw");
-    expect(declarations[1]?.parametersJsonSchema).toEqual({
+    expect(declarations[1]?.parameters).toEqual({
       type: "object",
       properties: {
         question: { type: "string" },
@@ -272,6 +331,35 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
       required: ["question"],
     });
     expect(declarations[1]?.behavior).toBe("NON_BLOCKING");
+  });
+
+  it("omits tool names that Google Live cannot accept", async () => {
+    const provider = buildGoogleRealtimeVoiceProvider();
+    const bridge = provider.createBridge({
+      providerConfig: { apiKey: "gemini-key" },
+      tools: [
+        createRealtimeTool("_lookup"),
+        createRealtimeTool("calendar.lookup:next"),
+        createRealtimeTool("1_lookup"),
+        createRealtimeTool("bad/name"),
+        createRealtimeTool(`x${"a".repeat(128)}`),
+        createMalformedToolName(undefined),
+        createMalformedToolName(null),
+        createMalformedToolName(42),
+        createUnreadableToolName(),
+      ],
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    });
+
+    await bridge.connect();
+
+    const config = lastConnectParams().config as {
+      tools?: Array<{ functionDeclarations?: Array<{ name?: string }> }>;
+    };
+    expect(config.tools?.[0]?.functionDeclarations?.map((declaration) => declaration.name)).toEqual(
+      ["_lookup", "calendar.lookup:next"],
+    );
   });
 
   it("omits zero temperature for native audio responses", async () => {
@@ -290,16 +378,69 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     expect(lastConnectParams().config).not.toHaveProperty("temperature");
   });
 
+  it("drops malformed VAD timing values before connecting", async () => {
+    const provider = buildGoogleRealtimeVoiceProvider();
+    const bridge = provider.createBridge({
+      providerConfig: {
+        apiKey: "gemini-key",
+        prefixPaddingMs: -1,
+        silenceDurationMs: 250.5,
+      },
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    });
+
+    await bridge.connect();
+
+    expect(lastConnectParams().config).not.toHaveProperty("realtimeInputConfig");
+  });
+
+  it("drops malformed thinking budgets before connecting", async () => {
+    const provider = buildGoogleRealtimeVoiceProvider();
+    const bridge = provider.createBridge({
+      providerConfig: {
+        apiKey: "gemini-key",
+        thinkingBudget: 24_576.5,
+      },
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    });
+
+    await bridge.connect();
+
+    expect(lastConnectParams().config).not.toHaveProperty("thinkingConfig");
+  });
+
+  it("passes Google Live dynamic thinking budget through", async () => {
+    const provider = buildGoogleRealtimeVoiceProvider();
+    const bridge = provider.createBridge({
+      providerConfig: {
+        apiKey: "gemini-key",
+        thinkingBudget: -1,
+      },
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    });
+
+    await bridge.connect();
+
+    expect(lastConnectParams().config.thinkingConfig).toEqual({ thinkingBudget: -1 });
+  });
+
   it("creates constrained browser sessions for Google Live Talk", async () => {
     const provider = buildGoogleRealtimeVoiceProvider();
 
-    const session = await provider.createBrowserSession?.({
+    const sessionLocal = await provider.createBrowserSession?.({
       providerConfig: {
         apiKey: "gemini-key",
         model: "gemini-live-2.5-flash-preview",
+        prefixPaddingMs: 100,
+        silenceDurationMs: 300,
         voice: "Puck",
         temperature: 0.4,
       },
+      prefixPaddingMs: 250,
+      silenceDurationMs: 650,
       instructions: "Speak briefly.",
       tools: [
         {
@@ -318,15 +459,28 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     });
 
     expect(createTokenMock).toHaveBeenCalledTimes(1);
-    const tokenConfig = createTokenMock.mock.calls[0]?.[0] as {
+    const tokenConfig = requireFirstMockArg(createTokenMock, "Google Live auth token config") as {
       config?: {
         liveConnectConstraints?: {
           config?: {
+            realtimeInputConfig?: {
+              automaticActivityDetection?: {
+                prefixPaddingMs?: number;
+                silenceDurationMs?: number;
+              };
+            };
             responseModalities?: string[];
             speechConfig?: { voiceConfig?: { prebuiltVoiceConfig?: { voiceName?: string } } };
             systemInstruction?: string;
             temperature?: number;
-            tools?: Array<{ functionDeclarations?: Array<{ behavior?: string; name?: string }> }>;
+            tools?: Array<{
+              functionDeclarations?: Array<{
+                behavior?: string;
+                name?: string;
+                parameters?: unknown;
+                parametersJsonSchema?: unknown;
+              }>;
+            }>;
           };
           model?: string;
         };
@@ -339,18 +493,29 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     expect(liveConstraints?.config?.responseModalities).toEqual(["AUDIO"]);
     expect(liveConstraints?.config?.temperature).toBe(0.4);
     expect(liveConstraints?.config?.systemInstruction).toBe("Speak briefly.");
+    expect(
+      liveConstraints?.config?.realtimeInputConfig?.automaticActivityDetection?.prefixPaddingMs,
+    ).toBe(250);
+    expect(
+      liveConstraints?.config?.realtimeInputConfig?.automaticActivityDetection?.silenceDurationMs,
+    ).toBe(650);
     expect(liveConstraints?.config?.speechConfig?.voiceConfig?.prebuiltVoiceConfig?.voiceName).toBe(
       "Puck",
     );
-    expect(liveConstraints?.config?.tools?.[0]?.functionDeclarations?.[0]?.name).toBe(
-      "openclaw_agent_consult",
-    );
-    expect(liveConstraints?.config?.tools?.[0]?.functionDeclarations?.[0]?.behavior).toBe(
-      "NON_BLOCKING",
-    );
-    expect(session?.provider).toBe("google");
-    expect(session?.transport).toBe("provider-websocket");
-    const websocketSession = session as {
+    const declaration = liveConstraints?.config?.tools?.[0]?.functionDeclarations?.[0];
+    expect(declaration?.name).toBe("openclaw_agent_consult");
+    expect(declaration?.behavior).toBe("NON_BLOCKING");
+    expect(declaration?.parameters).toEqual({
+      type: "object",
+      properties: {
+        question: { type: "string" },
+      },
+      required: ["question"],
+    });
+    expect(declaration?.parametersJsonSchema).toBeUndefined();
+    expect(sessionLocal?.provider).toBe("google");
+    expect(sessionLocal?.transport).toBe("provider-websocket");
+    const websocketSession = sessionLocal as {
       audio: {
         inputEncoding: string;
         inputSampleRateHz: number;
@@ -379,6 +544,34 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     expect(websocketSession.initialMessage.setup.generationConfig.responseModalities).toEqual([
       "AUDIO",
     ]);
+  });
+
+  it("rejects browser session expiry outside Date range", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(8_640_000_000_000_001);
+    const provider = buildGoogleRealtimeVoiceProvider();
+
+    await expect(
+      provider.createBrowserSession?.({
+        providerConfig: {
+          apiKey: "gemini-key",
+        },
+      }),
+    ).rejects.toThrow("Google realtime browser session expiry is outside the supported Date range");
+    expect(createTokenMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects browser session creation while the process clock is invalid", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Number.NaN);
+    const provider = buildGoogleRealtimeVoiceProvider();
+
+    await expect(
+      provider.createBrowserSession?.({
+        providerConfig: {
+          apiKey: "gemini-key",
+        },
+      }),
+    ).rejects.toThrow("Google realtime browser session expiry is outside the supported Date range");
+    expect(createTokenMock).not.toHaveBeenCalled();
   });
 
   it("can opt out of Google Live session resumption and context compression", async () => {
@@ -443,7 +636,7 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
       });
 
       expect(onClose).not.toHaveBeenCalled();
-      const error = onError.mock.calls[0]?.[0] as { message?: string };
+      const error = requireFirstError(onError);
       expect(error.message).toContain("reconnecting 1/3");
 
       await vi.advanceTimersByTimeAsync(250);
@@ -625,8 +818,9 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     });
 
     expect(onAudio).toHaveBeenCalledTimes(1);
-    expect(onAudio.mock.calls[0]?.[0]).toBeInstanceOf(Buffer);
-    expect(onAudio.mock.calls[0]?.[0]).toHaveLength(80);
+    const audio = requireFirstAudio(onAudio);
+    expect(audio).toBeInstanceOf(Buffer);
+    expect(audio).toHaveLength(80);
   });
 
   it("can keep Google PCM output as PCM16 24 kHz audio", async () => {
@@ -658,7 +852,7 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     });
 
     expect(onAudio).toHaveBeenCalledTimes(1);
-    expect(onAudio.mock.calls[0]?.[0]).toEqual(pcm24k);
+    expect(requireFirstAudio(onAudio)).toEqual(pcm24k);
   });
 
   it("does not forward Google thought text as assistant transcript", async () => {
@@ -682,6 +876,24 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     });
 
     expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("reports provider-confirmed input interruption as barge-in", async () => {
+    const provider = buildGoogleRealtimeVoiceProvider();
+    const onClearAudio = vi.fn();
+    const bridge = provider.createBridge({
+      providerConfig: { apiKey: "gemini-key" },
+      onAudio: vi.fn(),
+      onClearAudio,
+    });
+
+    await bridge.connect();
+    lastConnectParams().callbacks.onmessage({
+      setupComplete: {},
+      serverContent: { interrupted: true },
+    });
+
+    expect(onClearAudio).toHaveBeenCalledWith("barge-in");
   });
 
   it("forwards Live API tool calls and submits matching function responses", async () => {
@@ -786,7 +998,7 @@ describe("buildGoogleRealtimeVoiceProvider", () => {
     bridge.submitToolResult("missing-call", { result: "ok" });
 
     expect(session.sendToolResponse).not.toHaveBeenCalled();
-    const error = onError.mock.calls[0]?.[0] as { message?: string };
+    const error = requireFirstError(onError);
     expect(error.message).toBe(
       "Google Live function response is missing a matching function call for missing-call",
     );

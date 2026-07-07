@@ -1,23 +1,40 @@
+// Signal tests cover install signal cli plugin behavior.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import * as tar from "tar";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReleaseAsset } from "./install-signal-cli.js";
 
-const { fetchWithSsrFGuardMock } = vi.hoisted(() => ({
-  fetchWithSsrFGuardMock: vi.fn(),
-}));
+const { fetchWithSsrFGuardMock, resolveBrewExecutableMock, runPluginCommandWithTimeoutMock } =
+  vi.hoisted(() => ({
+    fetchWithSsrFGuardMock: vi.fn(),
+    resolveBrewExecutableMock: vi.fn(),
+    runPluginCommandWithTimeoutMock: vi.fn(),
+  }));
 
 vi.mock("openclaw/plugin-sdk/ssrf-runtime", () => ({
   fetchWithSsrFGuard: fetchWithSsrFGuardMock,
 }));
 
+vi.mock("openclaw/plugin-sdk/setup-tools", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/setup-tools")>();
+  return {
+    ...actual,
+    resolveBrewExecutable: resolveBrewExecutableMock,
+  };
+});
+
+vi.mock("openclaw/plugin-sdk/run-command", () => ({
+  runPluginCommandWithTimeout: runPluginCommandWithTimeoutMock,
+}));
+
 const {
   downloadToFile,
   extractSignalCliArchive,
+  installSignalCli,
   installSignalCliFromRelease,
   looksLikeArchive,
   pickAsset,
@@ -73,6 +90,8 @@ async function withTempFile(run: (filePath: string) => Promise<void>) {
 
 beforeEach(() => {
   fetchWithSsrFGuardMock.mockReset();
+  resolveBrewExecutableMock.mockReset();
+  runPluginCommandWithTimeoutMock.mockReset();
 });
 
 function requireAsset(asset: ReleaseAsset | undefined, label: string): ReleaseAsset {
@@ -83,7 +102,12 @@ function requireAsset(asset: ReleaseAsset | undefined, label: string): ReleaseAs
 }
 
 async function expectPathMissing(targetPath: string): Promise<void> {
-  await expect(fs.access(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
+  try {
+    await fs.access(targetPath);
+    throw new Error(`expected ${targetPath} to be missing`);
+  } catch (error) {
+    expect((error as { code?: string }).code).toBe("ENOENT");
+  }
 }
 
 describe("looksLikeArchive", () => {
@@ -136,6 +160,25 @@ describe("pickAsset", () => {
     it("selects the macOS-native asset on x64", () => {
       const result = requireAsset(pickAsset(SAMPLE_ASSETS, "darwin", "x64"), "darwin x64");
       expect(result.name).toContain("macOS-native");
+    });
+
+    it("does not fall back to Linux client archives when macOS assets are absent", () => {
+      const currentUpstreamAssets: ReleaseAsset[] = [
+        {
+          name: "signal-cli-0.14.5-Linux-client.tar.gz",
+          browser_download_url: "https://example.com/linux-client.tar.gz",
+        },
+        {
+          name: "signal-cli-0.14.5-Linux-native.tar.gz",
+          browser_download_url: "https://example.com/linux-native.tar.gz",
+        },
+        {
+          name: "signal-cli-0.14.5.tar.gz",
+          browser_download_url: "https://example.com/jvm.tar.gz",
+        },
+      ];
+
+      expect(pickAsset(currentUpstreamAssets, "darwin", "arm64")).toBeUndefined();
     });
   });
 
@@ -214,6 +257,24 @@ describe("downloadToFile", () => {
     expect(fetchResult.release).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["1e3", "0x10", `1${"0".repeat(309)}`])(
+    "ignores malformed declared archive lengths: %s",
+    async (contentLength) => {
+      const fetchResult = okDownloadResponse("archive", {
+        headers: { "content-length": contentLength },
+      });
+      fetchWithSsrFGuardMock.mockResolvedValue(fetchResult);
+
+      await withTempFile(async (filePath) => {
+        await downloadToFile("https://example.com/signal-cli.tgz", filePath, 5, 8);
+
+        await expect(fs.readFile(filePath, "utf-8")).resolves.toBe("archive");
+      });
+
+      expect(fetchResult.release).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("aborts streamed archives above the download cap and removes partial files", async () => {
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -238,18 +299,62 @@ describe("downloadToFile", () => {
 });
 
 describe("installSignalCliFromRelease", () => {
+  it("returns an installer error when GitHub release metadata is malformed JSON", async () => {
+    const fetchResult = okDownloadResponse("{not json", {
+      headers: { "content-type": "application/json" },
+    });
+    fetchWithSsrFGuardMock.mockResolvedValue(fetchResult);
+
+    const result = await installSignalCliFromRelease({ log: vi.fn() } as unknown as RuntimeEnv);
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Failed to parse signal-cli release info.",
+    });
+    expect(fetchResult.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds oversized GitHub release metadata and cancels the stream", async () => {
+    const chunkSize = 1024 * 1024;
+    const chunkCount = 20; // 20 MiB — over the 16 MiB cap
+    let readCount = 0;
+    let canceled = false;
+    const oversized = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (readCount >= chunkCount) {
+            controller.close();
+            return;
+          }
+          readCount += 1;
+          controller.enqueue(new Uint8Array(chunkSize));
+        },
+        cancel() {
+          canceled = true;
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+    const releaseMock = vi.fn().mockResolvedValue(undefined);
+    fetchWithSsrFGuardMock.mockResolvedValue({ response: oversized, release: releaseMock });
+
+    const result = await installSignalCliFromRelease({ log: vi.fn() } as unknown as RuntimeEnv);
+
+    expect(result).toEqual({ ok: false, error: "Failed to parse signal-cli release info." });
+    expect(canceled).toBe(true);
+    expect(readCount).toBeLessThan(chunkCount);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
   it("bounds the release metadata request with an explicit timeout", async () => {
     const fetchResult = okDownloadResponse(JSON.stringify({ tag_name: "v0.14.3", assets: [] }), {
       headers: { "content-type": "application/json" },
     });
     fetchWithSsrFGuardMock.mockResolvedValue(fetchResult);
 
-    await expect(
-      installSignalCliFromRelease({ log: vi.fn() } as unknown as RuntimeEnv),
-    ).resolves.toMatchObject({
-      ok: false,
-      error: "No compatible release asset found for this platform.",
-    });
+    const result = await installSignalCliFromRelease({ log: vi.fn() } as unknown as RuntimeEnv);
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("No compatible release asset found for this platform.");
 
     expect(fetchWithSsrFGuardMock).toHaveBeenCalledWith({
       url: "https://api.github.com/repos/AsamK/signal-cli/releases/latest",
@@ -266,6 +371,46 @@ describe("installSignalCliFromRelease", () => {
       },
     });
     expect(fetchResult.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("installSignalCli", () => {
+  const originalPlatform = process.platform;
+  const originalArch = process.arch;
+
+  function setProcessPlatform(platform: NodeJS.Platform, arch: string) {
+    Object.defineProperty(process, "platform", { configurable: true, value: platform });
+    Object.defineProperty(process, "arch", { configurable: true, value: arch });
+  }
+
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { configurable: true, value: originalPlatform });
+    Object.defineProperty(process, "arch", { configurable: true, value: originalArch });
+  });
+
+  it("uses Homebrew on macOS instead of downloading the first GitHub release archive", async () => {
+    setProcessPlatform("darwin", "arm64");
+    const brewPrefix = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-signal-brew-"));
+    await fs.mkdir(path.join(brewPrefix, "bin"), { recursive: true });
+    await fs.writeFile(path.join(brewPrefix, "bin", "signal-cli"), "");
+    resolveBrewExecutableMock.mockReturnValue("/opt/homebrew/bin/brew");
+    runPluginCommandWithTimeoutMock
+      .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ code: 0, stdout: `${brewPrefix}\n`, stderr: "" })
+      .mockResolvedValueOnce({ code: 0, stdout: "signal-cli 0.14.5\n", stderr: "" });
+
+    try {
+      const result = await installSignalCli({ log: vi.fn() } as unknown as RuntimeEnv);
+
+      expect(result).toEqual({
+        ok: true,
+        cliPath: path.join(brewPrefix, "bin", "signal-cli"),
+        version: "0.14.5",
+      });
+      expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(brewPrefix, { recursive: true, force: true });
+    }
   });
 });
 

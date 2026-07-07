@@ -1,7 +1,9 @@
+// Slack plugin module implements actions behavior.
 import type { Block, KnownBlock, WebClient } from "@slack/web-api";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
+import { z } from "zod";
 import { resolveSlackAccount } from "./accounts.js";
 import { validateSlackBlocksArray } from "./blocks-input.js";
 import { createSlackWebClient, getSlackWriteClient } from "./client.js";
@@ -69,12 +71,106 @@ function resolveToken(explicit?: string, accountId?: string, cfg?: OpenClawConfi
   return token;
 }
 
-function normalizeEmoji(raw: string) {
+const SLACK_EMOJI_SKIN_TONE_MODIFIER_RE = /[\u{1F3FB}-\u{1F3FF}]/u;
+const SLACK_EMOJI_VARIATION_SELECTOR_RE = /[\uFE0E\uFE0F]/g;
+const SLACK_EMOJI_SKIN_TONE_BY_MODIFIER = new Map([
+  ["🏻", 2],
+  ["🏼", 3],
+  ["🏽", 4],
+  ["🏾", 5],
+  ["🏿", 6],
+]);
+
+// Slack's reactions.add/remove accept only shortcode names, never a raw
+// Unicode glyph. Models keep passing the glyph because the `emoji` param
+// reads as "an emoji"; map the common ones so the reaction is not silently
+// dropped. Unknown glyphs still pass through unchanged (no regression).
+const SLACK_EMOJI_SHORTNAME_BY_GLYPH: Record<string, string> = {
+  "✅": "white_check_mark",
+  "❌": "x",
+  "👍": "thumbsup",
+  "👎": "thumbsdown",
+  "🎉": "tada",
+  "❤": "heart",
+  "😄": "smile",
+  "😂": "joy",
+  "🚀": "rocket",
+  "👀": "eyes",
+  "🙏": "pray",
+  "🔥": "fire",
+  "💯": "100",
+  "⚠": "warning",
+  "➕": "heavy_plus_sign",
+  "➖": "heavy_minus_sign",
+  "🤔": "thinking_face",
+  "👨‍💻": "male-technologist",
+  "👨💻": "male-technologist",
+  "👩‍💻": "female-technologist",
+  "⚡": "zap",
+  "🌐": "globe_with_meridians",
+  "😱": "scream",
+  "🥱": "yawning_face",
+  "😨": "fearful",
+  "⏳": "hourglass_flowing_sand",
+  "✍": "writing_hand",
+  "🗜": "compression",
+  "🧠": "brain",
+  "🛠": "hammer_and_wrench",
+  "💻": "computer",
+};
+
+function normalizeSlackEmojiName(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) {
     throw new Error("Emoji is required for Slack reactions");
   }
-  return trimmed.replace(/^:+|:+$/g, "");
+  const withoutColons = trimmed.replace(/^:+|:+$/g, "");
+  const modifier = withoutColons.match(SLACK_EMOJI_SKIN_TONE_MODIFIER_RE)?.[0];
+  const glyphKey = withoutColons
+    .replace(SLACK_EMOJI_SKIN_TONE_MODIFIER_RE, "")
+    .replace(SLACK_EMOJI_VARIATION_SELECTOR_RE, "");
+  const shortname = SLACK_EMOJI_SHORTNAME_BY_GLYPH[glyphKey];
+  const skinTone = modifier ? SLACK_EMOJI_SKIN_TONE_BY_MODIFIER.get(modifier) : undefined;
+  if (!shortname || !skinTone) {
+    return shortname ?? withoutColons;
+  }
+  return `${shortname}::skin-tone-${skinTone}`;
+}
+
+const SLACK_TIMESTAMP_RE = /^\d+(?:\.\d+)?$/;
+const ISO_8601_TIMESTAMP_SCHEMA = z.iso.datetime({ offset: true });
+
+function formatEpochSeconds(milliseconds: number): string {
+  const seconds = milliseconds / 1000;
+  if (Number.isInteger(seconds)) {
+    return String(seconds);
+  }
+  return seconds.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function normalizeSlackReadTimestamp(
+  raw: string | undefined,
+  field: "before" | "after",
+): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (SLACK_TIMESTAMP_RE.test(trimmed)) {
+    return trimmed;
+  }
+  if (!ISO_8601_TIMESTAMP_SCHEMA.safeParse(trimmed).success) {
+    throw new Error(
+      `Invalid Slack read ${field} timestamp "${trimmed}": expected a Slack timestamp or ISO-8601 date string`,
+    );
+  }
+  const parsed = Date.parse(trimmed);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(
+      `Invalid Slack read ${field} timestamp "${trimmed}": expected a Slack timestamp or ISO-8601 date string`,
+    );
+  }
+  return formatEpochSeconds(parsed);
 }
 
 function hasSlackPlatformError(err: unknown, code: string): boolean {
@@ -115,7 +211,7 @@ export async function reactSlackMessage(
     await client.reactions.add({
       channel: channelId,
       timestamp: messageId,
-      name: normalizeEmoji(emoji),
+      name: normalizeSlackEmojiName(emoji),
     });
   } catch (err) {
     if (hasSlackPlatformError(err, "already_reacted")) {
@@ -136,7 +232,7 @@ export async function removeSlackReaction(
     await client.reactions.remove({
       channel: channelId,
       timestamp: messageId,
-      name: normalizeEmoji(emoji),
+      name: normalizeSlackEmojiName(emoji),
     });
   } catch (err) {
     if (hasSlackPlatformError(err, "no_reaction")) {
@@ -258,6 +354,15 @@ export async function deleteSlackMessage(
   });
 }
 
+export async function resolveSlackConversationName(
+  channelId: string,
+  opts: SlackActionClientOpts = {},
+): Promise<string | undefined> {
+  const client = await getClient(opts, "read");
+  const info = await client.conversations.info({ channel: channelId });
+  return info.channel?.name?.trim() || undefined;
+}
+
 export async function readSlackMessages(
   channelId: string,
   opts: SlackActionClientOpts & {
@@ -268,7 +373,6 @@ export async function readSlackMessages(
     messageId?: string;
   } = {},
 ): Promise<{ messages: SlackMessageSummary[]; hasMore: boolean }> {
-  const client = await getClient(opts);
   const exactMessageId = opts.messageId?.trim();
   const readLimit = exactMessageId ? 1 : opts.limit;
   const exactBounds = exactMessageId
@@ -278,9 +382,10 @@ export async function readSlackMessages(
         oldest: undefined,
       }
     : {
-        latest: opts.before,
-        oldest: opts.after,
+        latest: normalizeSlackReadTimestamp(opts.before, "before"),
+        oldest: normalizeSlackReadTimestamp(opts.after, "after"),
       };
+  const client = await getClient(opts);
 
   // Use conversations.replies for thread messages, conversations.history for channel messages.
   if (opts.threadId) {

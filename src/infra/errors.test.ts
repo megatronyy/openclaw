@@ -1,3 +1,4 @@
+// Tests shared infra error formatting and classification.
 import { describe, expect, it } from "vitest";
 import {
   collectErrorGraphCandidates,
@@ -88,6 +89,13 @@ describe("error helpers", () => {
     expect(formatted).toBe("error A | error B");
   });
 
+  it("dedupes repeated cause messages while preserving deeper distinct causes", () => {
+    const rootCause = new Error("provider auth lookup failed");
+    const inner = new Error('No API key found for provider "openai".', { cause: rootCause });
+    const wrapper = new Error(inner.message, { cause: inner });
+    expect(formatErrorMessage(wrapper)).toBe(`${inner.message} | ${rootCause.message}`);
+  });
+
   it("redacts sensitive tokens from formatted error messages", () => {
     const token = "sk-abcdefghijklmnopqrstuv";
     const formatted = formatErrorMessage(new Error(`Authorization: Bearer ${token}`));
@@ -125,6 +133,14 @@ describe("error helpers", () => {
     },
     {
       value: Object.assign(new Error("Too many requests"), { code: 429 }),
+      expected: "rate_limit",
+    },
+    {
+      value: new Error("Rate limit exceeded, timeout: 30s"),
+      expected: "rate_limit",
+    },
+    {
+      value: Object.assign(new Error("HTTP 429 Too Many Requests"), { code: "ETIMEDOUT" }),
       expected: "rate_limit",
     },
     {

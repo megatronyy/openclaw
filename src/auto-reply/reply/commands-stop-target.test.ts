@@ -1,3 +1,4 @@
+// Tests stop command target resolution across active sessions and channel routes.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
@@ -12,15 +13,21 @@ import { handleStopCommand } from "./commands-session-abort.js";
 import "./commands-session-abort.test-support.js";
 import type { HandleCommandsParams } from "./commands-types.js";
 
-const abortEmbeddedPiRunMock = vi.hoisted(() => vi.fn());
+const abortEmbeddedAgentRunMock = vi.hoisted(() => vi.fn());
 const createInternalHookEventMock = vi.hoisted(() => vi.fn(() => ({})));
 const persistAbortTargetEntryMock = vi.hoisted(() => vi.fn(async () => true));
-const replyRunAbortMock = vi.hoisted(() => vi.fn());
+const resolveCommandSessionEntryForKeyMock = vi.hoisted(() =>
+  vi.fn(() => ({ entry: undefined, key: undefined })),
+);
 const resolveSessionIdMock = vi.hoisted(() => vi.fn(() => undefined));
 const stopSubagentsForRequesterMock = vi.hoisted(() => vi.fn(() => ({ stopped: 0 })));
+const abortSessionRunTargetWithOutcomeMock = vi.hoisted(() =>
+  vi.fn(() => ({ active: false, aborted: false })),
+);
+const formatAbortReplyTextMock = vi.hoisted(() => vi.fn(() => "⚙️ Agent was aborted."));
 
-vi.mock("../../agents/pi-embedded.js", () => ({
-  abortEmbeddedPiRun: abortEmbeddedPiRunMock,
+vi.mock("../../agents/embedded-agent.js", () => ({
+  abortEmbeddedAgentRun: abortEmbeddedAgentRunMock,
 }));
 
 vi.mock("../../globals.js", () => ({
@@ -38,20 +45,20 @@ vi.mock("./abort-cutoff.js", () => ({
 }));
 
 vi.mock("./abort.js", () => ({
-  formatAbortReplyText: vi.fn(() => "⚙️ Agent was aborted."),
+  abortSessionRunTargetWithOutcome: abortSessionRunTargetWithOutcomeMock,
+  formatAbortReplyText: formatAbortReplyTextMock,
   isAbortTrigger: vi.fn(() => false),
-  resolveSessionEntryForKey: vi.fn(() => ({ entry: undefined, key: undefined })),
   setAbortMemory: vi.fn(),
   stopSubagentsForRequester: stopSubagentsForRequesterMock,
 }));
 
 vi.mock("./commands-session-store.js", () => ({
   persistAbortTargetEntry: persistAbortTargetEntryMock,
+  resolveCommandSessionEntryForKey: resolveCommandSessionEntryForKeyMock,
 }));
 
 vi.mock("./reply-run-registry.js", () => ({
   replyRunRegistry: {
-    abort: replyRunAbortMock,
     resolveSessionId: resolveSessionIdMock,
   },
 }));
@@ -132,6 +139,7 @@ describe("handleStopCommand target fallback", () => {
   beforeEach(() => {
     previousPluginRegistry = getActivePluginRegistry();
     vi.clearAllMocks();
+    abortSessionRunTargetWithOutcomeMock.mockReturnValue({ active: false, aborted: false });
     persistAbortTargetEntryMock.mockResolvedValue(true);
   });
 
@@ -152,27 +160,58 @@ describe("handleStopCommand target fallback", () => {
       shouldContinue: false,
       reply: { text: "⚙️ Agent was aborted." },
     });
-    expect(replyRunAbortMock).toHaveBeenCalledWith("agent:target:telegram:direct:123");
-    expect(abortEmbeddedPiRunMock).not.toHaveBeenCalledWith("wrapper-session-id");
-    expect(persistAbortTargetEntryMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: "agent:target:telegram:direct:123",
-        entry: undefined,
-      }),
-    );
-    expect(stopSubagentsForRequesterMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        requesterSessionKey: "agent:target:telegram:direct:123",
-      }),
-    );
+    expect(abortSessionRunTargetWithOutcomeMock).toHaveBeenCalledWith({
+      key: "agent:target:telegram:direct:123",
+      sessionId: undefined,
+    });
+    expect(abortEmbeddedAgentRunMock).not.toHaveBeenCalledWith("wrapper-session-id");
+    const [[persistAbortTargetParams]] = persistAbortTargetEntryMock.mock.calls as unknown as Array<
+      [
+        {
+          key?: string;
+          entry?: unknown;
+          sessionStore?: unknown;
+          storePath?: string;
+        },
+      ]
+    >;
+    expect(persistAbortTargetParams?.key).toBe("agent:target:telegram:direct:123");
+    expect(persistAbortTargetParams?.entry).toBeUndefined();
+    expect(persistAbortTargetParams?.sessionStore).toBe(params.sessionStore);
+    expect(persistAbortTargetParams?.storePath).toBe("/tmp/sessions.json");
+    const [[stopSubagentsParams]] = stopSubagentsForRequesterMock.mock.calls as unknown as Array<
+      [{ cfg?: unknown; requesterSessionKey?: string }]
+    >;
+    expect(stopSubagentsParams?.cfg).toBe(params.cfg);
+    expect(stopSubagentsParams?.requesterSessionKey).toBe("agent:target:telegram:direct:123");
     expect(createInternalHookEventMock).toHaveBeenCalledWith(
       "command",
       "stop",
       "agent:target:telegram:direct:123",
-      expect.objectContaining({
+      {
         sessionEntry: undefined,
-      }),
+        sessionId: undefined,
+        commandSource: "telegram",
+        senderId: "owner",
+      },
     );
+  });
+
+  it("reports a finalizing target without persisting abort state", async () => {
+    const params = buildStopParams();
+    abortSessionRunTargetWithOutcomeMock.mockReturnValue({ active: true, aborted: false });
+    formatAbortReplyTextMock.mockReturnValue(
+      "Agent reply is already finalizing and can no longer be aborted.",
+    );
+
+    const result = await handleStopCommand(params, true);
+
+    expect(result).toEqual({
+      shouldContinue: false,
+      reply: { text: "Agent reply is already finalizing and can no longer be aborted." },
+    });
+    expect(formatAbortReplyTextMock).toHaveBeenCalledWith(0, "finalizing");
+    expect(persistAbortTargetEntryMock).not.toHaveBeenCalled();
   });
 
   it("rejects native stop commands from non-owner senders when the plugin enforces owner-only commands", async () => {
@@ -212,7 +251,7 @@ describe("handleStopCommand target fallback", () => {
       shouldContinue: false,
       reply: { text: "You are not authorized to use this command." },
     });
-    expect(replyRunAbortMock).not.toHaveBeenCalled();
+    expect(abortSessionRunTargetWithOutcomeMock).not.toHaveBeenCalled();
     expect(persistAbortTargetEntryMock).not.toHaveBeenCalled();
     expect(createInternalHookEventMock).not.toHaveBeenCalled();
     expect(stopSubagentsForRequesterMock).not.toHaveBeenCalled();

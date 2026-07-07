@@ -1,11 +1,15 @@
-import type { Api, Message } from "@earendil-works/pi-ai";
+// Runtime LLM helpers adapt plugin provider hooks into the core model runtime.
+import { parseModelCatalogRef } from "@openclaw/model-catalog-core/model-catalog-refs";
+import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { modelKey } from "../../agents/model-ref-shared.js";
 import { normalizeModelRef } from "../../agents/model-selection.js";
 import type { NormalizedUsage, UsageLike } from "../../agents/usage.js";
 import { normalizeUsage } from "../../agents/usage.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { Api, Message } from "../../llm/types.js";
 import { getChildLogger } from "../../logging.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
-import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import { normalizePluginsConfig } from "../config-state.js";
 import { getPluginRuntimeGatewayRequestScope } from "./gateway-request-scope.js";
@@ -24,6 +28,7 @@ export type RuntimeLlmAuthority = {
   pluginIdForPolicy?: string;
   sessionKey?: string;
   agentId?: string;
+  preferredProfile?: string;
   requiresBoundAgent?: boolean;
   allowAgentIdOverride?: boolean;
   allowModelOverride?: boolean;
@@ -214,7 +219,7 @@ function buildUsage(params: {
 }
 
 function finiteOption(value: number | undefined): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return asFiniteNumber(value);
 }
 
 function normalizeAllowedModelRef(raw: string): string | null {
@@ -225,17 +230,12 @@ function normalizeAllowedModelRef(raw: string): string | null {
   if (trimmed === "*") {
     return "*";
   }
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash >= trimmed.length - 1) {
+  const parsed = parseModelCatalogRef(trimmed);
+  if (!parsed) {
     return null;
   }
-  const provider = trimmed.slice(0, slash).trim();
-  const model = trimmed.slice(slash + 1).trim();
-  if (!provider || !model) {
-    return null;
-  }
-  const normalized = normalizeModelRef(provider, model);
-  return `${normalized.provider}/${normalized.model}`;
+  const normalized = normalizeModelRef(parsed.provider, parsed.modelId);
+  return modelKey(normalized.provider, normalized.model);
 }
 
 function buildPolicyFromEntry(entry: {
@@ -381,6 +381,7 @@ export function createRuntimeLlm(options: CreateRuntimeLlmOptions = {}): PluginR
       const pluginPolicyId = resolvePluginPolicyId(options.authority, caller);
       const pluginPolicy = resolvePluginLlmOverridePolicy(cfg, pluginPolicyId);
       const authorityPolicy = resolveAuthorityModelPolicy(options.authority);
+      const preferredProfile = normalizeOptionalString(options.authority?.preferredProfile);
       const agentId = await resolveAgentId({
         request: params,
         cfg,
@@ -402,7 +403,7 @@ export function createRuntimeLlm(options: CreateRuntimeLlmOptions = {}): PluginR
           ? normalizeModelRef(selection.provider, selection.modelId)
           : null;
         const resolvedModelRef = normalizedSelection
-          ? `${normalizedSelection.provider}/${normalizedSelection.model}`
+          ? modelKey(normalizedSelection.provider, normalizedSelection.model)
           : null;
         assertAllowedModelOverride({
           resolvedModelRef,
@@ -416,7 +417,10 @@ export function createRuntimeLlm(options: CreateRuntimeLlmOptions = {}): PluginR
         cfg,
         agentId,
         modelRef: params.model,
+        preferredProfile,
+        allowBundledStaticCatalogFallback: true,
         allowMissingApiKeyModes: ["aws-sdk"],
+        skipAgentDiscovery: true,
       });
 
       if ("error" in prepared) {

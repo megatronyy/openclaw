@@ -1,11 +1,12 @@
+// Doctor install tests cover install checks, repair notes, and binary/package diagnostics.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { note } from "../terminal/note.js";
+import { note } from "../../packages/terminal-core/src/note.js";
 import { withTempDir } from "../test-helpers/temp-dir.js";
 import { noteSourceInstallIssues } from "./doctor-install.js";
 
-vi.mock("../terminal/note.js", () => ({
+vi.mock("../../packages/terminal-core/src/note.js", () => ({
   note: vi.fn(),
 }));
 
@@ -40,7 +41,10 @@ describe("noteSourceInstallIssues", () => {
       noteSourceInstallIssues(root);
 
       expect(note).toHaveBeenCalledWith(
-        expect.stringContaining("node_modules was not installed by pnpm"),
+        [
+          "- node_modules was not installed by pnpm (missing node_modules/.pnpm). Run: pnpm install so bundled plugins can load package-local dependencies.",
+          "- tsx binary is missing for source runs. Run: pnpm install.",
+        ].join("\n"),
         "Install",
       );
     });

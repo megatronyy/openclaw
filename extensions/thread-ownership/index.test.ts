@@ -1,3 +1,4 @@
+// Thread Ownership tests cover index plugin behavior.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi } from "./api.js";
 import register from "./index.js";
@@ -37,6 +38,14 @@ describe("thread-ownership plugin", () => {
     const init = call[1];
     expect(init?.method).toBe("POST");
     expect(init?.body).toBe(JSON.stringify({ agent_id: agentId }));
+  }
+
+  function requireFirstLogMessage(mock: ReturnType<typeof vi.fn>, label: string): string {
+    const [call] = mock.mock.calls;
+    if (!call || typeof call[0] !== "string") {
+      throw new Error(`expected ${label}`);
+    }
+    return call[0];
   }
 
   beforeEach(() => {
@@ -256,8 +265,7 @@ describe("thread-ownership plugin", () => {
       const result = await sendSlackThreadMessage();
 
       expect(result).toEqual({ cancel: true });
-      const infoMessage = vi.mocked(api.logger.info).mock.calls[0]?.[0];
-      expect(typeof infoMessage).toBe("string");
+      const infoMessage = requireFirstLogMessage(api.logger.info, "ownership cancel info log");
       expect(infoMessage).toContain("cancelled send");
     });
 
@@ -267,8 +275,7 @@ describe("thread-ownership plugin", () => {
       const result = await sendSlackThreadMessage();
 
       expect(result).toBeUndefined();
-      const warningMessage = vi.mocked(api.logger.warn).mock.calls[0]?.[0];
-      expect(typeof warningMessage).toBe("string");
+      const warningMessage = requireFirstLogMessage(api.logger.warn, "ownership check warning log");
       expect(warningMessage).toContain("ownership check failed");
     });
   });

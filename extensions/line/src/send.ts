@@ -1,9 +1,12 @@
+// Line plugin module implements send behavior.
 import { messagingApi } from "@line/bot-sdk";
 import { recordChannelActivity } from "openclaw/plugin-sdk/channel-activity-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { resolveLineAccount } from "./accounts.js";
+import { messageAction } from "./actions.js";
 import { resolveLineChannelAccessToken } from "./channel-access-token.js";
 import { validateLineMediaUrl } from "./outbound-media.js";
 import { createLineSendReceipt } from "./send-receipt.js";
@@ -66,6 +69,18 @@ function normalizeTarget(to: string): string {
 
   if (!normalized) {
     throw new Error("Recipient is required for LINE sends");
+  }
+
+  // Real LINE chat ids are a capital C/U/R followed by 32 lowercase hex chars
+  // (33 chars total) and are case-sensitive — push returns HTTP 400 otherwise.
+  // Reject values that match the LINE id shape but lost their leading capital
+  // so the failure is surfaced as a permanent error (recovery moves the entry
+  // to failed/ immediately instead of silently retrying 5 times). Short test
+  // fixtures (e.g. "U123") are left alone. openclaw/openclaw#81628
+  if (normalized.length >= 33 && !/^[CUR]/.test(normalized)) {
+    throw new Error(
+      `Recipient is not a valid LINE id (case-sensitive; expected leading capital C/U/R): ${normalized.slice(0, 4)}…`,
+    );
   }
 
   return normalized;
@@ -148,8 +163,8 @@ export function createLocationMessage(location: {
 }): LocationMessage {
   return {
     type: "location",
-    title: location.title.slice(0, 100),
-    address: location.address.slice(0, 100),
+    title: truncateUtf16Safe(location.title, 100),
+    address: truncateUtf16Safe(location.address, 100),
     latitude: location.latitude,
     longitude: location.longitude,
   };
@@ -212,7 +227,7 @@ async function pushLineMessages(
   });
 
   if (behavior.errorContext) {
-    await pushRequest.catch((err) => {
+    await pushRequest.catch((err: unknown) => {
       logLineHttpError(err, behavior.errorContext!);
       throw err;
     });
@@ -289,7 +304,6 @@ export async function sendMessageLine(
       case "audio":
         messages.push(createAudioMessage(mediaUrl, opts.durationMs ?? 60000));
         break;
-      case "image":
       default:
         // Backward compatibility: keep image as default when media kind is unspecified.
         {
@@ -406,7 +420,7 @@ export async function pushFlexMessage(
 ): Promise<LineSendResult> {
   const flexMessage: FlexMessage = {
     type: "flex",
-    altText: altText.slice(0, 400),
+    altText: truncateUtf16Safe(altText, 400),
     contents,
   };
 
@@ -442,11 +456,7 @@ export async function pushTextMessageWithQuickReplies(
 export function createQuickReplyItems(labels: string[]): QuickReply {
   const items: QuickReplyItem[] = labels.slice(0, 13).map((label) => ({
     type: "action",
-    action: {
-      type: "message",
-      label: label.slice(0, 20),
-      text: label,
-    },
+    action: messageAction(label, label),
   }));
   return { items };
 }

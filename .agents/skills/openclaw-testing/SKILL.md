@@ -18,10 +18,97 @@ or validating a change without wasting hours.
 
 Prove the touched surface first. Do not reflexively run the whole suite.
 
+Agent sessions are remote-first for tests and computationally intensive work.
+Classify source trust before selecting a backend. Trusted maintainer code
+defaults to Blacksmith Testbox. Untrusted contributor or fork code must use
+secretless fork CI or sanitized direct AWS Crabbox; never sync or run it on the
+credential-hydrated Blacksmith workflow.
+
+When trusted work is likely to change code or need tests, builds, typechecks,
+lint fan-out, Docker, packaging, E2E, or live proof, immediately start this in
+a background command session:
+
+```bash
+node scripts/crabbox-wrapper.mjs warmup \
+  --provider blacksmith-testbox \
+  --keep \
+  --timing-json
+```
+
+For untrusted code, switch to a clean trusted `main` checkout and pre-warm
+direct AWS with an installed trusted Crabbox binary. Do not execute the
+untrusted checkout's wrapper or config locally:
+
+```bash
+cd <trusted-openclaw-main>
+env -u CRABBOX_AWS_INSTANCE_PROFILE \
+  crabbox config show --json | \
+  jq -e '.aws.instanceProfile == ""' >/dev/null
+env -u CRABBOX_AWS_INSTANCE_PROFILE \
+  -u CRABBOX_TAILSCALE \
+  -u CRABBOX_TAILSCALE_AUTH_KEY \
+  -u CRABBOX_TAILSCALE_AUTH_KEY_ENV \
+  -u CRABBOX_TAILSCALE_EXIT_NODE \
+  -u CRABBOX_TAILSCALE_EXIT_NODE_ALLOW_LAN_ACCESS \
+  -u CRABBOX_TAILSCALE_HOSTNAME_TEMPLATE \
+  -u CRABBOX_TAILSCALE_TAGS \
+  crabbox warmup \
+  --provider aws \
+  --network public \
+  --tailscale=false \
+  --tailscale-exit-node= \
+  --tailscale-exit-node-allow-lan-access=false \
+  --keep \
+  --timing-json
+crabbox inspect --provider aws --id <cbx_id> --json | \
+  jq -e '.network == "public" and .tailscale == null' >/dev/null
+```
+
+Bind the returned lease to one immutable reviewed head SHA; never repurpose a
+trusted or previously hydrated lease, and stop/rewarm if the head changes.
+Record the reviewed PR's full head SHA with
+`gh pr view <number> --repo <owner/repo> --json headRefOid --jq .headRefOid`.
+Every untrusted AWS run must override the repo env allowlist, skip Actions
+hydration, and upload the trusted bootstrap script from clean `main` alongside
+`--fresh-pr`. The script bypasses raw-box JavaScript preflight, proves the
+identity boundary, installs pinned Node/pnpm, verifies the exact SHA and
+package-manager pin, isolates `HOME`, installs dependencies, then runs the
+requested test command:
+
+```bash
+env -u CRABBOX_AWS_INSTANCE_PROFILE \
+  CRABBOX_ENV_ALLOW=CI \
+  crabbox run \
+  --provider aws \
+  --id <cbx_id> \
+  --fresh-pr <owner/repo#number> \
+  --no-hydrate \
+  --timing-json \
+  --script scripts/crabbox-untrusted-bootstrap.sh -- \
+  <expected_head_sha> /usr/local/bin/pnpm test <path-or-filter>
+# After all proof:
+env -u CRABBOX_AWS_INSTANCE_PROFILE \
+  crabbox stop --provider aws <cbx_id>
+```
+
+Continue inspection and editing while the remote box hydrates. Save the
+returned id, reuse it for the task's focused tests and heavy gates, sync the
+current checkout on every run, and stop it before handoff. Do not pre-warm for
+read-only, docs-only, or clearly trivial work that will not run tests or heavy
+commands.
+
 1. Inspect the diff and classify the touched surface:
-   - source: `pnpm changed:lanes --json`, then `pnpm check:changed`
-   - tests only: `pnpm test:changed`
-   - one failing file: `pnpm test <path-or-filter> -- --reporter=verbose`
+   - any agent-run test, focused or broad: run it on the pre-warmed safe remote
+     backend; Blacksmith Testbox only for trusted maintainer code
+   - changed gates, builds, typechecks, lint fan-out, Docker, package, E2E, or
+     live work: run it remotely; these are never routine laptop work
+   - normal source checkout, `pnpm check:changed`: it delegates to
+     Crabbox/Testbox, but prefer the explicit kept-lease path when a Testbox was
+     pre-warmed so the task reuses one lease
+   - explicit local fallback requested by the user, one/few files:
+     `node scripts/run-vitest.mjs <path-or-filter>`
+   - direct AWS Crabbox proof: pass `--provider aws`; untrusted code also
+     requires the sanitized invocation above
    - workflow-only: `git diff --check`, workflow syntax/lint (`actionlint` when available)
    - docs-only: `pnpm docs:list`, docs formatter/lint only if docs tooling changed or requested
 2. Reproduce narrowly before fixing.
@@ -32,35 +119,121 @@ Prove the touched surface first. Do not reflexively run the whole suite.
 ## Guardrails
 
 - Do not kill unrelated processes or tests. If something is running elsewhere, treat it as owned by the user or another agent.
-- Do not run expensive local Docker, full release checks, full `pnpm test`, or full `pnpm check` unless the user asks or the change genuinely requires it.
+- Do not run tests or computationally intensive commands locally unless the user explicitly asks for local proof. Remote-provider unavailability permits only a narrow reported fallback, not a silent local full gate.
 - Prefer GitHub Actions for release/Docker proof when the workflow already has the prepared image and secrets.
 - Use `scripts/committer "<msg>" <paths...>` when committing; stage only your files.
-- If deps are missing, run `pnpm install`, retry once, then report the first actionable error.
-- For Blacksmith Testbox proof, use Crabbox first. `pnpm crabbox:run -- --provider
-blacksmith-testbox --timing-json -- <command...>` warms, claims, syncs, runs,
-  reports, and cleans up one-shot boxes. Reuse only an id/slug created in this
-  operator session; `blacksmith testbox list` is diagnostics only, not a shared
-  work queue.
+- If dependencies are missing on the selected remote box, run `pnpm install` there, retry
+  once, then report the first actionable error. Do not reconcile or reinstall a
+  local Codex worktree merely to run validation.
+- In a Codex worktree or linked/sparse checkout, do not run direct local
+  `pnpm test*`, `pnpm check*`, `pnpm crabbox:run`, or `scripts/committer`. Use
+  `node scripts/crabbox-wrapper.mjs` for remote proof, and `git commit --no-verify`
+  only after the relevant remote proof is already clean. The direct
+  `node scripts/run-vitest.mjs` path is an explicit local fallback only.
+- For remote proof, use the Crabbox wrapper first, but name the actual backend.
+  Direct AWS Crabbox uses `provider=aws` and `cbx_...` ids. Delegated
+  Blacksmith Testbox through Crabbox uses `provider=blacksmith-testbox`,
+  `syncDelegated=true`, and `tbx_...` ids. Both satisfy "remote proof" when the
+  requested proof surface allows either.
+- Treat contributor and fork patches as untrusted unless a maintainer
+  explicitly approves credentialed execution after review. For untrusted AWS
+  runs, `CRABBOX_ENV_ALLOW=CI` must replace the repo's
+  `OPENCLAW_*` allowlist, `--no-hydrate` must block auth-profile hydration, and
+  the remote command must use a fresh temporary `HOME`. The lease must be newly
+  warmed for and bound to one reviewed head SHA, never trusted or previously
+  hydrated; stop and rewarm when the SHA changes. Do
+  not execute repo scripts or config from the untrusted local checkout: launch
+  an installed trusted Crabbox binary from a clean trusted `main` checkout and
+  fetch the PR with `--fresh-pr`. Unset `CRABBOX_AWS_INSTANCE_PROFILE` and fail
+  closed unless `crabbox config show --json` resolves an empty
+  `aws.instanceProfile`. Before any install/test, use trusted absolute-path
+  tools to require an IMDSv2 token, prove the IAM credentials endpoint returns
+  404, and compare remote `git rev-parse HEAD` with the full reviewed head SHA.
+  Unset all `CRABBOX_TAILSCALE*` overrides, pass `--network public
+  --tailscale=false`, clear exit-node/LAN flags, then require `crabbox inspect`
+  to report `network=public` and no Tailscale state before uploading any script.
+  Upload trusted `scripts/crabbox-untrusted-bootstrap.sh` with `--fresh-pr`; it
+  bootstraps Node 24 and repository-pinned pnpm before executing PR code and
+  rejects a changed `packageManager` pin before install.
+  If the broker cannot provide that no-role proof or no remote PR exists, use
+  secretless fork CI. Do not select `hydrate-github` or a credential-hydrated
+  Testbox workflow.
+- Do not infer "no Testbox is running" from plain `blacksmith testbox list`.
+  Use `blacksmith testbox list --all` or `blacksmith testbox status <tbx_id>`
+  before reporting cloud state.
+- Reuse only an id/slug created in this operator session unless explicitly
+  coordinating with another lane. If Testbox queues, fails capacity, or cannot
+  allocate, report the blocker or switch to direct AWS Crabbox only when that
+  still proves the requested surface.
+- Reuse does not mean stale source: omit `--no-sync` so every run uploads the
+  current checkout. Use `--no-sync` only to rerun an unchanged, already-synced
+  tree intentionally.
 
-## Local Test Shortcuts
+## Explicit Local Test Fallbacks
+
+These commands are for human workflows or an agent's explicit local fallback.
+They are not the default agent path.
 
 ```bash
 pnpm changed:lanes --json
-pnpm check:changed       # changed typecheck/lint/guards; no Vitest
+pnpm check:changed       # Crabbox/Testbox changed typecheck/lint/guards; no Vitest
 pnpm test:changed        # cheap smart changed Vitest targets
+pnpm verify              # full check, then full Vitest
 OPENCLAW_TEST_CHANGED_BROAD=1 pnpm test:changed
 pnpm test <path-or-filter> -- --reporter=verbose
 OPENCLAW_VITEST_MAX_WORKERS=1 pnpm test <path-or-filter>
 ```
 
 Use targeted file paths whenever possible. Avoid raw `vitest`; use the repo
-`pnpm test` wrapper so project routing, workers, and setup stay correct.
+`pnpm test` wrapper so project routing, workers, and setup stay correct. If raw
+Vitest is unavoidable, use `vitest run ...`; bare `vitest ...` starts local watch
+mode and will not exit on its own.
+When the checkout is a Codex worktree, prefer the direct node harness instead:
+
+```bash
+node scripts/run-vitest.mjs <path-or-filter>
+```
+
+That keeps the test scoped without giving pnpm a chance to run dependency
+status checks or install reconciliation in a linked worktree.
+
+## Plugin Package And Live Proof
+
+When validating an external or official plugin package, prove the package shape
+and trust shape separately. Do not use raw archive/path installs to prove the
+managed dependency path, and do not treat `npm-pack:` as proof of catalog-linked
+official trust.
+
+- For local release-candidate proof, pack the plugin and install it with
+  `openclaw plugins install npm-pack:<path.tgz> --force`. This uses the managed
+  per-plugin npm project and is the closest local substitute for the registry
+  artifact's dependency behavior.
+- If the behavior depends on bundled-plugin or trusted official plugin status,
+  add a second proof through a catalog-backed official install or a published
+  package path that records official trust. Local `npm-pack:` proof alone is
+  not sufficient for privileged helpers or trusted-official scope handling.
+- Treat missing runtime imports as package-manifest bugs first. Runtime code
+  must depend on packages declared in the plugin package `dependencies` or
+  `optionalDependencies`; do not make a final proof depend on manually running
+  `npm install` inside `~/.openclaw/npm/projects/...`.
+- If the plugin ships `npm-shrinkwrap.json`, regenerate or check it after
+  moving dependencies between dev and runtime sections.
+- Inspect the packed tarball when dependency ownership or generated `dist/`
+  matters: verify `package/package.json`, the expected runtime files, and any
+  package-local shrinkwrap before installing it on a live host.
+- After installing the package, restart the Gateway when the touched surface is
+  plugin registration, runtime dependency loading, privileged helpers, provider
+  routing, or generated dist.
+- For live provider or channel probes, add only temporary config needed for the
+  proof, then remove it and verify the cleanup state before closeout.
 
 ## Command Semantics
 
 - `pnpm check` and `pnpm check:changed` do not run Vitest tests. They are for
   typecheck, lint, and guard proof.
 - `pnpm test` and `pnpm test:changed` run Vitest tests.
+- `pnpm verify` runs `pnpm check`, then `pnpm test`, with Crabbox phase markers
+  so remote summaries show which half failed.
 - `pnpm test:changed` is intentionally cheap by default: direct test edits,
   sibling tests, explicit source mappings, and import-graph dependents.
 - `OPENCLAW_TEST_CHANGED_BROAD=1 pnpm test:changed` is the explicit broad
@@ -103,6 +276,8 @@ gh run view <run-id> --job <job-id> --log
 - Check exact SHA. Ignore newer unrelated `main` unless asked.
 - For cancelled same-branch runs, confirm whether a newer run superseded it.
 - Fetch full logs only for failed or relevant jobs.
+- Prefer `gh run view <run-id> --json jobs` over PR rollup while debugging; rollup can be stale/noisy.
+- For `prompt:snapshots:check` failures, treat Linux Node 24 as CI truth. If macOS passes but CI drifts, reproduce in a Linux Node 24 container or Testbox, commit that generated output, then rerun.
 
 ## GitHub Release Workflows
 
@@ -180,7 +355,7 @@ workflow only spends setup and queue time on that suite.
 ### Release Evidence
 
 After release-candidate validation or before a release decision, record the
-important run ids in the private `openclaw/releases-private` evidence ledger.
+important run ids in the public `openclaw/releases` evidence ledger.
 Use the manual `OpenClaw Release Evidence`
 (`openclaw-release-evidence.yml`) workflow there. It writes durable summaries
 under `evidence/<release-id>/` and commits:
@@ -203,13 +378,13 @@ short release-manager notes there. Do not store raw logs, provider
 prompts/responses, channel transcripts, signing material, or secret-bearing
 config in git; raw logs stay in Actions artifacts.
 
-When `Full Release Validation` completes and
-`OPENCLAW_RELEASES_PRIVATE_DISPATCH_TOKEN` is configured in the public repo, it
-requests the private `OpenClaw Release Evidence From Full Validation` workflow.
-That private workflow reads the parent full-validation run, extracts the child
-CI/release-checks/Telegram run ids from the parent logs, and opens the evidence
-PR automatically. If the token is absent or the run predates this wiring, trigger
-that private workflow manually with the full-validation run id.
+When `Full Release Validation` completes and `OPENCLAW_RELEASES_DISPATCH_TOKEN`
+is configured in the source repo, it requests the public
+`OpenClaw Release Evidence From Full Validation` workflow. That workflow reads
+the parent full-validation run, extracts the child CI/release-checks/Telegram
+run ids from the parent logs, and opens the evidence PR automatically. If the
+token is absent or the run predates this wiring, trigger that workflow manually
+with the full-validation run id.
 
 ### Release Checks
 

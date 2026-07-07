@@ -1,3 +1,4 @@
+// Channel session tests cover session persistence, lookup, and lifecycle helpers.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MsgContext } from "../auto-reply/templating.js";
 
@@ -5,8 +6,8 @@ const recordSessionMetaFromInboundMock = vi.fn((_args?: unknown) => Promise.reso
 const updateLastRouteMock = vi.fn((_args?: unknown) => Promise.resolve(undefined));
 
 vi.mock("../config/sessions/inbound.runtime.js", () => ({
-  recordSessionMetaFromInbound: (args: unknown) => recordSessionMetaFromInboundMock(args),
-  updateLastRoute: (args: unknown) => updateLastRouteMock(args),
+  recordInboundSessionMeta: (args: unknown) => recordSessionMetaFromInboundMock(args),
+  updateSessionLastRoute: (args: unknown) => updateLastRouteMock(args),
 }));
 
 type SessionModule = typeof import("./session.js");
@@ -22,19 +23,13 @@ function requireFirstCallArg(mock: ReturnType<typeof vi.fn>): {
     to?: string;
   };
 } {
-  const arg = mock.mock.calls[0]?.[0] as
-    | {
-        sessionKey?: string;
-        ctx?: MsgContext;
-        createIfMissing?: boolean;
-        deliveryContext?: {
-          channel?: string;
-          to?: string;
-        };
-      }
-    | undefined;
-  if (!arg) {
+  const [call] = mock.mock.calls;
+  if (!call) {
     throw new Error("Expected mock call argument");
+  }
+  const [arg] = call;
+  if (typeof arg !== "object" || arg === null || Array.isArray(arg)) {
+    throw new Error("Expected mock call argument to be an object");
   }
   return arg;
 }
@@ -115,6 +110,37 @@ describe("recordInboundSession", () => {
     const route = requireFirstCallArg(updateLastRouteMock);
     expect(route.sessionKey).toBe("agent:main:demo-channel:1234:thread:42");
     expect(route.ctx).toBe(ctx);
+  });
+
+  it("preserves Signal group ids before recording and route updates", async () => {
+    const mixedGroupId = "VWATodkf2hc8zdOS76q9Tb0+5Bi522E03qLdaQ/9ypg=";
+    const signalCtx: MsgContext = {
+      Provider: "signal",
+      ChatType: "group",
+      From: `signal:group:${mixedGroupId}`,
+      To: `signal:group:${mixedGroupId}`,
+      SessionKey: `agent:main:signal:group:${mixedGroupId}`,
+      OriginatingTo: `signal:group:${mixedGroupId}`,
+    };
+
+    await recordInboundSession({
+      storePath: "/tmp/openclaw-session-store.json",
+      sessionKey: `Agent:Main:Signal:Group:${mixedGroupId}`,
+      ctx: signalCtx,
+      updateLastRoute: {
+        sessionKey: `Agent:Main:Signal:Group:${mixedGroupId}`,
+        channel: "signal",
+        to: `signal:group:${mixedGroupId}`,
+      },
+      onRecordError: vi.fn(),
+    });
+
+    expect(requireFirstCallArg(recordSessionMetaFromInboundMock).sessionKey).toBe(
+      `agent:main:signal:group:${mixedGroupId}`,
+    );
+    const route = requireFirstCallArg(updateLastRouteMock);
+    expect(route.sessionKey).toBe(`agent:main:signal:group:${mixedGroupId}`);
+    expect(route.ctx).toBe(signalCtx);
   });
 
   it("skips last-route updates when main DM owner pin mismatches sender", async () => {

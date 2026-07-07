@@ -1,6 +1,11 @@
+/** Verifies provider auth choice helper defaults, sorting, and config matching. */
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import type { ModelProviderConfig } from "../config/types.models.js";
 import { applyDefaultModel, applyProviderAuthConfigPatch } from "./provider-auth-choice-helpers.js";
+
+const providerConfigNormalizer = ({ providerConfig }: { providerConfig: ModelProviderConfig }) =>
+  providerConfig;
 
 describe("applyProviderAuthConfigPatch", () => {
   const base = {
@@ -62,13 +67,13 @@ describe("applyProviderAuthConfigPatch", () => {
         params: { maxTokens: 12000 },
       },
     });
-    expect(Object.prototype.hasOwnProperty.call(models, "__proto__")).toBe(false);
+    expect(Object.hasOwn(models ?? {}, "__proto__")).toBe(false);
     expect(Object.getPrototypeOf(Object.assign({}, models)).polluted).toBeUndefined();
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   it("keeps normal recursive merges for unrelated provider auth patch fields", () => {
-    const base = {
+    const baseLocal = {
       agents: {
         defaults: {
           contextPruning: {
@@ -88,7 +93,7 @@ describe("applyProviderAuthConfigPatch", () => {
       },
     };
 
-    const next = applyProviderAuthConfigPatch(base, patch);
+    const next = applyProviderAuthConfigPatch(baseLocal, patch);
 
     expect(next).toEqual({
       agents: {
@@ -100,6 +105,43 @@ describe("applyProviderAuthConfigPatch", () => {
         },
       },
     });
+  });
+
+  it("deletes provider auth fields marked undefined by auth patches", () => {
+    const baseLocal = {
+      models: {
+        providers: {
+          "microsoft-foundry": {
+            baseUrl: "https://example.services.ai.azure.com/openai/v1",
+            api: "anthropic-messages",
+            authHeader: false,
+            apiKey: "FOUNDRY_API_KEY",
+            headers: { "api-key": "FOUNDRY_API_KEY" },
+            models: [],
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+    const patch = {
+      models: {
+        providers: {
+          "microsoft-foundry": {
+            authHeader: true,
+            apiKey: undefined,
+            headers: undefined,
+          },
+        },
+      },
+    };
+
+    const next = applyProviderAuthConfigPatch(baseLocal, patch, { providerConfigNormalizer });
+    const provider = next.models?.providers?.["microsoft-foundry"] as
+      | Record<string, unknown>
+      | undefined;
+
+    expect(provider).toMatchObject({ authHeader: true });
+    expect(provider).not.toHaveProperty("apiKey");
+    expect(provider).not.toHaveProperty("headers");
   });
 
   it("normalizes retired Google Gemini model refs from provider config patches", () => {
@@ -133,6 +175,39 @@ describe("applyProviderAuthConfigPatch", () => {
       "google/gemini-3.1-pro-preview": {
         alias: "gemini",
         params: { thinking: "high", maxTokens: 12_000 },
+      },
+    });
+  });
+
+  it("normalizes retired Google Gemini per-agent refs from provider config patches", () => {
+    const patch = {
+      agents: {
+        list: [
+          {
+            id: "ops",
+            model: {
+              primary: "google/gemini-3-pro-preview",
+              fallbacks: ["google/gemini-3-pro-preview"],
+            },
+            models: {
+              "google/gemini-3-pro-preview": {
+                alias: "ops-gemini",
+              },
+            },
+          },
+        ],
+      },
+    };
+
+    const next = applyProviderAuthConfigPatch({}, patch);
+
+    expect(next.agents?.list?.[0]?.model).toEqual({
+      primary: "google/gemini-3.1-pro-preview",
+      fallbacks: ["google/gemini-3.1-pro-preview"],
+    });
+    expect(next.agents?.list?.[0]?.models).toEqual({
+      "google/gemini-3.1-pro-preview": {
+        alias: "ops-gemini",
       },
     });
   });
@@ -179,7 +254,7 @@ describe("applyProviderAuthConfigPatch", () => {
       },
     } satisfies OpenClawConfig;
 
-    const next = applyProviderAuthConfigPatch({}, patch);
+    const next = applyProviderAuthConfigPatch({}, patch, { providerConfigNormalizer });
 
     expect(next.models?.providers?.google?.models?.[0]?.id).toBe("google/gemini-3.1-pro-preview");
     expect(next.models?.providers?.google?.api).toBe("openai-completions");
@@ -209,7 +284,7 @@ describe("applyProviderAuthConfigPatch", () => {
       },
     } satisfies OpenClawConfig;
 
-    const next = applyProviderAuthConfigPatch({}, patch);
+    const next = applyProviderAuthConfigPatch({}, patch, { providerConfigNormalizer });
 
     expect(next.models?.providers?.kilocode?.models?.[0]?.id).toBe("google/gemini-3.1-pro-preview");
   });

@@ -1,11 +1,13 @@
+// Xai tests cover video generation provider plugin behavior.
 import {
   getProviderHttpMocks,
   installProviderHttpMockCleanup,
 } from "openclaw/plugin-sdk/provider-http-test-mocks";
 import { expectExplicitVideoGenerationCapabilities } from "openclaw/plugin-sdk/provider-test-contracts";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { postJsonRequestMock, fetchWithTimeoutMock } = getProviderHttpMocks();
+const { postJsonRequestMock, fetchWithTimeoutMock, readProviderJsonResponseMock } =
+  getProviderHttpMocks();
 
 let buildXaiVideoGenerationProvider: typeof import("./video-generation-provider.js").buildXaiVideoGenerationProvider;
 
@@ -15,14 +17,61 @@ beforeAll(async () => {
 
 installProviderHttpMockCleanup();
 
+beforeEach(() => {
+  readProviderJsonResponseMock.mockImplementation(async <T>(response: Response, label: string) => {
+    const maxBytes = 16 * 1024 * 1024;
+    if (!response.body) {
+      try {
+        return (await response.json()) as T;
+      } catch (cause) {
+        throw new Error(`${label}: malformed JSON response`, { cause });
+      }
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel();
+          throw new Error(`${label}: JSON response exceeds ${maxBytes} bytes`);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const body = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return JSON.parse(new TextDecoder().decode(body)) as T;
+    } catch (cause) {
+      throw new Error(`${label}: malformed JSON response`, { cause });
+    }
+  });
+});
+
 function requirePostJsonCall(index = 0): {
   url?: string;
   body?: Record<string, unknown>;
+  headers?: Headers;
 } {
   const params = (postJsonRequestMock.mock.calls as unknown as Array<[unknown]>)[index]?.[0] as
     | {
         url?: string;
         body?: Record<string, unknown>;
+        headers?: Headers;
       }
     | undefined;
   if (!params) {
@@ -47,6 +96,64 @@ function requireFetchInitCall(index: number): {
     init: call[1],
     timeoutMs: call[2],
   };
+}
+
+function streamedVideoResponse(bytes: string, contentType = "video/mp4"): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(bytes));
+        controller.close();
+      },
+    }),
+    { headers: { "content-type": contentType } },
+  );
+}
+
+function streamedJsonResponse(payload: unknown): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(JSON.stringify(payload)));
+        controller.close();
+      },
+    }),
+    { headers: { "content-type": "application/json" } },
+  );
+}
+
+// Drives an unbounded JSON body (>16 MiB, no Content-Length) so the bounded
+// reader has to cancel the stream instead of buffering it all. The 1 MiB
+// chunks are emitted lazily on `pull`, and a hard ceiling guards the test from
+// hanging if the reader ever fails to cancel.
+function oversizedJsonResponse(): {
+  response: Response;
+  state: { canceled: boolean; enqueuedBytes: number };
+} {
+  const state = { canceled: false, enqueuedBytes: 0 };
+  const chunk = 1024 * 1024;
+  // 64 MiB ceiling: 4x the 16 MiB cap, so the bounded reader must cancel long
+  // before we run out of chunks.
+  const maxChunks = 64;
+  let emitted = 0;
+  const response = new Response(
+    new ReadableStream({
+      pull(controller) {
+        if (emitted >= maxChunks) {
+          controller.close();
+          return;
+        }
+        emitted += 1;
+        state.enqueuedBytes += chunk;
+        controller.enqueue(new Uint8Array(chunk));
+      },
+      cancel() {
+        state.canceled = true;
+      },
+    }),
+    { headers: { "content-type": "application/json" } },
+  );
+  return { response, state };
 }
 
 describe("xai video generation provider", () => {
@@ -97,11 +204,266 @@ describe("xai video generation provider", () => {
     const pollRequest = requireFetchInitCall(0);
     expect(pollRequest.url).toBe("https://api.x.ai/v1/videos/req_123");
     expect(pollRequest.init?.method).toBe("GET");
-    expect(pollRequest.timeoutMs).toBe(120000);
+    expect(provider.defaultTimeoutMs).toBe(600_000);
+    expect(pollRequest.timeoutMs).toBe(600_000);
     expect(result.videos[0]?.mimeType).toBe("video/webm");
     expect(result.videos[0]?.fileName).toBe("video-1.webm");
     expect(result.metadata?.requestId).toBe("req_123");
     expect(result.metadata?.mode).toBe("generate");
+  });
+
+  it("rejects generated video downloads that exceed the configured media cap", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: {
+        json: async () => ({ request_id: "req_too_large" }),
+      },
+      release: vi.fn(async () => {}),
+    });
+    fetchWithTimeoutMock
+      .mockResolvedValueOnce({
+        json: async () => ({
+          request_id: "req_too_large",
+          status: "done",
+          video: { url: "https://cdn.x.ai/too-large.mp4" },
+        }),
+      })
+      .mockResolvedValueOnce(streamedVideoResponse("too-large"));
+
+    const provider = buildXaiVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "xai",
+        model: "grok-imagine-video",
+        prompt: "short video",
+        cfg: { agents: { defaults: { mediaMaxMb: 0.000001 } } },
+      }),
+    ).rejects.toThrow("xAI generated video download exceeds 1 bytes");
+  });
+
+  it("bounds an unbounded successful xAI create JSON body and cancels the stream", async () => {
+    const oversized = oversizedJsonResponse();
+    postJsonRequestMock.mockResolvedValue({
+      response: oversized.response,
+      release: vi.fn(async () => {}),
+    });
+
+    const provider = buildXaiVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "xai",
+        model: "grok-imagine-video",
+        prompt: "oversized create body",
+        cfg: {},
+      }),
+    ).rejects.toThrow("xAI video generation response: JSON response exceeds 16777216 bytes");
+    // The bounded reader cancelled the stream rather than buffering the whole
+    // body, and stopped reading well before the 64 MiB ceiling.
+    expect(oversized.state.canceled).toBe(true);
+    expect(oversized.state.enqueuedBytes).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  it("bounds an unbounded successful xAI poll JSON body and cancels the stream", async () => {
+    const oversized = oversizedJsonResponse();
+    postJsonRequestMock.mockResolvedValue({
+      response: streamedJsonResponse({ request_id: "req_poll_oversized" }),
+      release: vi.fn(async () => {}),
+    });
+    fetchWithTimeoutMock.mockResolvedValueOnce(oversized.response);
+
+    const provider = buildXaiVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "xai",
+        model: "grok-imagine-video",
+        prompt: "oversized poll body",
+        cfg: {},
+      }),
+    ).rejects.toThrow("xAI video generation response: JSON response exceeds 16777216 bytes");
+    expect(oversized.state.canceled).toBe(true);
+    expect(oversized.state.enqueuedBytes).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  it("wraps malformed successful xAI create responses", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: {
+        json: async () => [],
+      },
+      release: vi.fn(async () => {}),
+    });
+
+    const provider = buildXaiVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "xai",
+        model: "grok-imagine-video",
+        prompt: "bad shape",
+        cfg: {},
+      }),
+    ).rejects.toThrow("xAI video generation response malformed");
+  });
+
+  it("wraps non-JSON successful xAI create responses", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: new Response("<html>Unexpected token < in JSON</html>", {
+        headers: { "content-type": "text/html" },
+      }),
+      release: vi.fn(async () => {}),
+    });
+
+    const provider = buildXaiVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "xai",
+        model: "grok-imagine-video",
+        prompt: "html body",
+        cfg: {},
+      }),
+    ).rejects.toThrow("xAI video generation response malformed");
+  });
+
+  it("treats unknown xAI poll statuses as continue-polling and returns when terminal", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: {
+        json: async () => ({ request_id: "req_unknown_then_done" }),
+      },
+      release: vi.fn(async () => {}),
+    });
+    fetchWithTimeoutMock
+      .mockResolvedValueOnce({
+        json: async () => ({
+          request_id: "req_unknown_then_done",
+          status: "almost_done",
+        }),
+      })
+      .mockResolvedValueOnce({
+        json: async () => ({
+          request_id: "req_unknown_then_done",
+          status: "submitted",
+        }),
+      })
+      .mockResolvedValueOnce({
+        json: async () => ({
+          request_id: "req_unknown_then_done",
+          status: "done",
+          video: { url: "https://cdn.x.ai/eventual.mp4" },
+        }),
+      })
+      .mockResolvedValueOnce({
+        headers: new Headers({ "content-type": "video/mp4" }),
+        arrayBuffer: async () => Buffer.from("mp4"),
+      });
+
+    const provider = buildXaiVideoGenerationProvider();
+    const result = await provider.generateVideo({
+      provider: "xai",
+      model: "grok-imagine-video",
+      prompt: "unknown then done",
+      cfg: {},
+    });
+
+    expect(result.metadata?.requestId).toBe("req_unknown_then_done");
+    expect(result.metadata?.status).toBe("done");
+  });
+
+  it("treats `cancelled` as a terminal failure", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: {
+        json: async () => ({ request_id: "req_cancelled" }),
+      },
+      release: vi.fn(async () => {}),
+    });
+    fetchWithTimeoutMock.mockResolvedValueOnce({
+      json: async () => ({
+        request_id: "req_cancelled",
+        status: "cancelled",
+      }),
+    });
+
+    const provider = buildXaiVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "xai",
+        model: "grok-imagine-video",
+        prompt: "cancelled",
+        cfg: {},
+      }),
+    ).rejects.toThrow("xAI video generation cancelled");
+  });
+
+  it("rejects completed xAI poll responses without output URLs as malformed", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: {
+        json: async () => ({ request_id: "req_no_video" }),
+      },
+      release: vi.fn(async () => {}),
+    });
+    fetchWithTimeoutMock.mockResolvedValueOnce({
+      json: async () => ({
+        request_id: "req_no_video",
+        status: "done",
+        video: {},
+      }),
+    });
+
+    const provider = buildXaiVideoGenerationProvider();
+    await expect(
+      provider.generateVideo({
+        provider: "xai",
+        model: "grok-imagine-video",
+        prompt: "missing video",
+        cfg: {},
+      }),
+    ).rejects.toThrow("xAI video generation response malformed");
+  });
+
+  it("normalizes the xAI 'pending' poll status to 'processing' and keeps polling until done", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: {
+        json: async () => ({
+          request_id: "req_pending",
+        }),
+      },
+      release: vi.fn(async () => {}),
+    });
+    fetchWithTimeoutMock
+      // First poll: in-progress payload mirroring xAI's real shape
+      .mockResolvedValueOnce({
+        json: async () => ({
+          request_id: "req_pending",
+          status: "pending",
+          progress: 42,
+        }),
+      })
+      // Second poll: complete
+      .mockResolvedValueOnce({
+        json: async () => ({
+          request_id: "req_pending",
+          status: "done",
+          video: { url: "https://cdn.x.ai/video-pending.mp4" },
+          progress: 100,
+        }),
+      })
+      // Download
+      .mockResolvedValueOnce({
+        headers: new Headers({ "content-type": "video/mp4" }),
+        arrayBuffer: async () => Buffer.from("mp4-bytes"),
+      });
+
+    const provider = buildXaiVideoGenerationProvider();
+    const result = await provider.generateVideo({
+      provider: "xai",
+      model: "grok-imagine-video",
+      prompt: "Pending then done",
+      cfg: {},
+      durationSeconds: 6,
+      aspectRatio: "9:16",
+      resolution: "720P",
+    });
+
+    // Two poll calls (one pending, one done) — not throwing on "pending"
+    expect((fetchWithTimeoutMock.mock.calls as unknown[]).length).toBeGreaterThanOrEqual(2);
+    expect(result.videos[0]?.mimeType).toBe("video/mp4");
+    expect(result.metadata?.requestId).toBe("req_pending");
   });
 
   it("sends a single unroled image as xAI first-frame image-to-video", async () => {

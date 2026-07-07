@@ -2,16 +2,38 @@
 
 set -euo pipefail
 
-mode="${1:-}"
-package_dir="${2:-}"
+usage() {
+  echo "usage: bash scripts/plugin-npm-publish.sh [--dry-run|--pack-dry-run|--publish] <package-dir>"
+}
 
-if [[ "${mode}" != "--dry-run" && "${mode}" != "--pack-dry-run" && "${mode}" != "--publish" ]]; then
-  echo "usage: bash scripts/plugin-npm-publish.sh [--dry-run|--pack-dry-run|--publish] <package-dir>" >&2
-  exit 2
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
 fi
 
+mode="${1:-}"
+if [[ "${mode}" != "--dry-run" && "${mode}" != "--pack-dry-run" && "${mode}" != "--publish" ]]; then
+  usage >&2
+  exit 2
+fi
+shift
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+package_dir=""
+if [[ "$#" -gt 0 ]]; then
+  case "$1" in
+    -*) echo "unexpected plugin npm package-dir option: $1" >&2; exit 2 ;;
+    *) package_dir="$1"; shift ;;
+  esac
+fi
 if [[ -z "${package_dir}" ]]; then
   echo "missing package dir" >&2
+  exit 2
+fi
+if [[ "$#" -gt 0 ]]; then
+  echo "unexpected plugin npm publish argument: $1" >&2
   exit 2
 fi
 
@@ -36,6 +58,7 @@ import {
 const plan = resolveNpmPublishPlan(
   process.env.PACKAGE_VERSION ?? "",
   process.env.CURRENT_BETA_VERSION,
+  process.env.OPENCLAW_PLUGIN_NPM_PUBLISH_TAG,
 );
 const auth = resolveNpmDistTagMirrorAuth({
   nodeAuthToken: process.env.NODE_AUTH_TOKEN,
@@ -82,6 +105,11 @@ build_package_runtime() {
   fi
   log "Package-local runtime build: ${package_dir}"
   node scripts/lib/plugin-npm-runtime-build.mjs "${package_dir}" >&2
+}
+
+check_package_shrinkwrap() {
+  log "Package-local shrinkwrap check: ${package_dir}"
+  node scripts/generate-npm-shrinkwrap.mjs --package-dir "${package_dir}" --check >&2
 }
 
 mirror_auth_token=""
@@ -132,9 +160,11 @@ if [[ "${mode}" == "--dry-run" ]]; then
 fi
 
 build_package_runtime
+check_package_shrinkwrap
 
 if [[ "${mode}" == "--pack-dry-run" ]]; then
-  node scripts/lib/plugin-npm-package-manifest.mjs --run "${package_dir}" -- \
+  OPENCLAW_PLUGIN_NPM_BUNDLE_DEPENDENCIES=1 \
+    node scripts/lib/plugin-npm-package-manifest.mjs --run "${package_dir}" -- \
     npm pack --dry-run --json --ignore-scripts
   exit 0
 fi
@@ -143,7 +173,8 @@ fi
   cleanup_files=()
   trap 'rm -f "${cleanup_files[@]}"' EXIT
   run_with_manifest_overlay() {
-    node scripts/lib/plugin-npm-package-manifest.mjs --run "${package_dir}" -- "$@"
+    OPENCLAW_PLUGIN_NPM_BUNDLE_DEPENDENCIES=1 \
+      node scripts/lib/plugin-npm-package-manifest.mjs --run "${package_dir}" -- "$@"
   }
   publish_userconfig=""
   if [[ -n "${publish_auth_token}" ]]; then

@@ -1,3 +1,4 @@
+// Discord tests cover send.webhook activity plugin behavior.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const recordChannelActivityMock = vi.hoisted(() => vi.fn());
@@ -25,6 +26,16 @@ vi.mock("openclaw/plugin-sdk/channel-activity-runtime", async () => {
 });
 
 let sendWebhookMessageDiscord: typeof import("./send.webhook.js").sendWebhookMessageDiscord;
+
+type MockWithCalls = { mock: { calls: unknown[][] } };
+
+function firstMockCall(mock: MockWithCalls, label: string): unknown[] {
+  const call = mock.mock.calls[0];
+  if (!call) {
+    throw new Error(`expected ${label} call`);
+  }
+  return call;
+}
 
 describe("sendWebhookMessageDiscord activity", () => {
   beforeAll(async () => {
@@ -126,7 +137,7 @@ describe("sendWebhookMessageDiscord activity", () => {
 
     const fetchMock = vi.mocked(fetch);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]).toEqual([
+    expect(firstMockCall(fetchMock, "fetch")).toEqual([
       "https://discord.com/api/v10/webhooks/wh-1/tok-1?wait=true&thread_id=thread-1",
       {
         method: "POST",

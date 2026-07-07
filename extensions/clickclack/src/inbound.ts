@@ -1,9 +1,20 @@
-import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-message";
+/**
+ * Converts authorized ClickClack messages into OpenClaw agent/model replies and
+ * routes resulting outbound text back to ClickClack.
+ */
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { resolveClickClackInboundAccess, type ClickClackInboundAccess } from "./access.js";
+import { createClickClackActivityPublisher, type ClickClackActivityPublisher } from "./activity.js";
+import { createClickClackClient } from "./http-client.js";
 import { sendClickClackText } from "./outbound.js";
 import { getClickClackRuntime } from "./runtime.js";
 import { buildClickClackTarget } from "./target.js";
-import type { ClickClackMessage, CoreConfig, ResolvedClickClackAccount } from "./types.js";
+import type {
+  ClickClackMessage,
+  ClickClackMessageProvenance,
+  CoreConfig,
+  ResolvedClickClackAccount,
+} from "./types.js";
 
 const CHANNEL_ID = "clickclack" as const;
 
@@ -77,13 +88,28 @@ async function dispatchModelReply(params: {
   });
 }
 
+/**
+ * Dispatches one already-fetched ClickClack message through the configured
+ * reply mode for its account.
+ */
 export async function handleClickClackInbound(params: {
   account: ResolvedClickClackAccount;
   config: CoreConfig;
   message: ClickClackMessage;
+  access?: ClickClackInboundAccess;
 }) {
   const runtime = getClickClackRuntime();
   const message = params.message;
+  const access =
+    params.access ??
+    (await resolveClickClackInboundAccess({
+      account: params.account,
+      config: params.config,
+      message,
+    }));
+  if (!access.shouldDispatch) {
+    return;
+  }
   const isDirect = Boolean(message.direct_conversation_id);
   const target = buildClickClackTarget(
     isDirect
@@ -106,6 +132,31 @@ export async function handleClickClackInbound(params: {
     });
     return;
   }
+  // Durable activity rows (streamed commentary + tool progress) are a
+  // per-account opt-in: they need a ClickClack bot token carrying the
+  // agent_activity:write scope. Publishing is best-effort and must never
+  // break final text delivery.
+  // Resolved model/thinking for this turn (from onModelSelected); stamped as
+  // attribution metadata onto activity rows and the final reply message.
+  let turnProvenance: ClickClackMessageProvenance | undefined;
+  let activity: ClickClackActivityPublisher | undefined;
+  if (params.account.agentActivity && (message.channel_id || message.direct_conversation_id)) {
+    activity = createClickClackActivityPublisher({
+      client: createClickClackClient({
+        baseUrl: params.account.baseUrl,
+        token: params.account.token,
+      }),
+      target: message.channel_id
+        ? { channelId: message.channel_id }
+        : { conversationId: message.direct_conversation_id },
+      turnId: message.id,
+      onError: (error) => {
+        runtime.logging
+          .getChildLogger({ plugin: "clickclack", feature: "agent-activity" })
+          .warn(`clickclack activity publish failed: ${String(error)}`);
+      },
+    });
+  }
   const senderName = message.author?.display_name || message.author_id;
   const previousTimestamp = runtime.channel.session.readSessionUpdatedAt({
     storePath: runtime.channel.session.resolveStorePath(params.config.session?.store, {
@@ -113,6 +164,8 @@ export async function handleClickClackInbound(params: {
     }),
     sessionKey: route.sessionKey,
   });
+  // Preserve both normalized channel fields and ClickClack-native ids so reply
+  // routing, session recovery, and command authorization see the same message.
   const body = runtime.channel.reply.formatAgentEnvelope({
     channel: "ClickClack",
     from: senderName,
@@ -150,52 +203,67 @@ export async function handleClickClackInbound(params: {
     Timestamp: message.created_at,
     OriginatingChannel: CHANNEL_ID,
     OriginatingTo: target,
-    CommandAuthorized: true,
+    CommandAuthorized: access.commandAuthorized,
   });
-  const { onModelSelected, ...replyPipeline } = createChannelMessageReplyPipeline({
+  const dispatchPromise = runtime.channel.inbound.dispatchReply({
     cfg: params.config as OpenClawConfig,
+    channel: CHANNEL_ID,
+    accountId: params.account.accountId,
     agentId: route.agentId,
-    channel: CHANNEL_ID,
-    accountId: params.account.accountId,
-  });
-  await runtime.channel.turn.runPrepared({
-    channel: CHANNEL_ID,
-    accountId: params.account.accountId,
     routeSessionKey: route.sessionKey,
     storePath,
     ctxPayload,
     recordInboundSession: runtime.channel.session.recordInboundSession,
-    runDispatch: async () =>
-      await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-        ctx: ctxPayload,
-        cfg: params.config as OpenClawConfig,
-        dispatcherOptions: {
-          ...replyPipeline,
-          deliver: async (payload) => {
-            const text =
-              payload && typeof payload === "object" && "text" in payload
-                ? ((payload as { text?: string }).text ?? "")
-                : "";
-            if (!text.trim()) {
-              return;
-            }
-            await sendClickClackText({
-              cfg: params.config,
-              accountId: params.account.accountId,
-              to: target,
-              text,
-              threadId: message.parent_message_id ? message.thread_root_id : undefined,
-              replyToId: message.id,
-            });
+    dispatchReplyWithBufferedBlockDispatcher:
+      runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
+    toolsAllow: params.account.toolsAllow,
+    // Provenance stamping shares the agentActivity opt-in: with the flag off
+    // the extension's wire payloads stay byte-identical to pre-activity
+    // builds, which is the documented contract for stock setups.
+    replyOptions: activity
+      ? {
+          onModelSelected: (ctx: { provider: string; model: string; thinkLevel?: string }) => {
+            turnProvenance = {
+              model: ctx.provider && ctx.model ? `${ctx.provider}/${ctx.model}` : ctx.model,
+              thinking: ctx.thinkLevel,
+            };
+            activity?.setProvenance(turnProvenance);
           },
-          onError: (error) => {
-            throw error instanceof Error
-              ? error
-              : new Error(`clickclack dispatch failed: ${String(error)}`);
-          },
-        },
-        replyOptions: { onModelSelected },
-      }),
+          onItemEvent: activity.onItemEvent,
+          commentaryProgressEnabled: true,
+          // The durable activity rows are ClickClack's own progress
+          // rendering, so item events must flow even when session verbose
+          // mode is off and the default tool-progress texts stay suppressed.
+          suppressDefaultToolProgressMessages: true,
+          allowProgressCallbacksWhenSourceDeliverySuppressed: true,
+        }
+      : undefined,
+    delivery: {
+      deliver: async (payload) => {
+        const text =
+          payload && typeof payload === "object" && "text" in payload
+            ? ((payload as { text?: string }).text ?? "")
+            : "";
+        if (!text.trim()) {
+          return;
+        }
+        await sendClickClackText({
+          cfg: params.config,
+          accountId: params.account.accountId,
+          to: target,
+          text,
+          threadId: message.parent_message_id ? message.thread_root_id : undefined,
+          replyToId: message.id,
+          provenance: turnProvenance,
+        });
+      },
+      onError: (error) => {
+        throw error instanceof Error
+          ? error
+          : new Error(`clickclack dispatch failed: ${String(error)}`);
+      },
+    },
+    replyPipeline: {},
     record: {
       onRecordError: (error) => {
         throw error instanceof Error
@@ -204,4 +272,9 @@ export async function handleClickClackInbound(params: {
       },
     },
   });
+  try {
+    await dispatchPromise;
+  } finally {
+    await activity?.finalize();
+  }
 }

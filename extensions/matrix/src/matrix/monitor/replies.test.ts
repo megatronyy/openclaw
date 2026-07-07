@@ -1,3 +1,4 @@
+// Matrix tests cover replies plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginRuntime, RuntimeEnv } from "../../../runtime-api.js";
 import type { MatrixClient } from "../sdk.js";
@@ -22,9 +23,19 @@ vi.mock("../send.js", () => ({
 import { setMatrixRuntime } from "../../runtime.js";
 import { deliverMatrixReplies } from "./replies.js";
 
+function sendCall(index: number) {
+  const call = sendMessageMatrixMock.mock.calls.at(index);
+  if (!call) {
+    throw new Error(`Expected send call at index ${index}`);
+  }
+  return call;
+}
+
 function sendOptions(index: number): Record<string, unknown> {
-  const options = sendMessageMatrixMock.mock.calls[index]?.[2];
-  expect(options).toBeDefined();
+  const options = sendCall(index)[2];
+  if (!options || typeof options !== "object") {
+    throw new Error(`Expected send options at call ${index}`);
+  }
   return options as Record<string, unknown>;
 }
 
@@ -46,8 +57,8 @@ describe("deliverMatrixReplies", () => {
       text: {
         resolveMarkdownTableMode: (params: unknown) => resolveMarkdownTableModeMock(params),
         convertMarkdownTables: (text: string) => convertMarkdownTablesMock(text),
-        resolveChunkMode: (cfg: unknown, channel: unknown, accountId?: unknown) =>
-          resolveChunkModeMock(cfg, channel, accountId),
+        resolveChunkMode: (cfgLocal: unknown, channel: unknown, accountId?: unknown) =>
+          resolveChunkModeMock(cfgLocal, channel, accountId),
         chunkMarkdownTextWithMode: (text: string) => chunkMarkdownTextWithModeMock(text),
       },
     },
@@ -125,20 +136,20 @@ describe("deliverMatrixReplies", () => {
     });
 
     expect(sendMessageMatrixMock).toHaveBeenCalledTimes(3);
-    expect(sendMessageMatrixMock.mock.calls[0]?.[0]).toBe("room:2");
-    expect(sendMessageMatrixMock.mock.calls[0]?.[1]).toBe("caption");
+    expect(sendCall(0)[0]).toBe("room:2");
+    expect(sendCall(0)[1]).toBe("caption");
     expect(sendOptions(0).mediaUrl).toBe("https://example.com/a.jpg");
     expect(sendOptions(0).mediaLocalRoots).toEqual(["/tmp/openclaw-matrix-test"]);
     expect(sendOptions(0).replyToId).toBe("reply-media");
-    expect(sendMessageMatrixMock.mock.calls[1]?.[0]).toBe("room:2");
-    expect(sendMessageMatrixMock.mock.calls[1]?.[1]).toBe("");
+    expect(sendCall(1)[0]).toBe("room:2");
+    expect(sendCall(1)[1]).toBe("");
     expect(sendOptions(1).mediaUrl).toBe("https://example.com/b.jpg");
     expect(sendOptions(1).mediaLocalRoots).toEqual(["/tmp/openclaw-matrix-test"]);
     expect(sendOptions(1).replyToId).toBe("reply-media");
     expect(sendOptions(2).replyToId).toBe("reply-text");
   });
 
-  it("suppresses replyToId when threadId is set", async () => {
+  it("keeps replyToId when threadId is set so Matrix can send fallback metadata", async () => {
     chunkMatrixTextMock.mockImplementation((text: string) => ({
       trimmedText: text.trim(),
       convertedText: text,
@@ -149,19 +160,20 @@ describe("deliverMatrixReplies", () => {
 
     await deliverMatrixReplies({
       cfg,
-      replies: [{ text: "hello|thread", replyToId: "reply-thread" }],
+      replies: [{ text: "hello|thread" }],
       roomId: "room:3",
       client: {} as MatrixClient,
       runtime: runtimeEnv,
       textLimit: 4000,
-      replyToMode: "all",
+      replyToMode: "off",
       threadId: "thread-77",
+      replyToId: "reply-thread",
     });
 
     expect(sendMessageMatrixMock).toHaveBeenCalledTimes(2);
-    expect(sendOptions(0).replyToId).toBeUndefined();
+    expect(sendOptions(0).replyToId).toBe("reply-thread");
     expect(sendOptions(0).threadId).toBe("thread-77");
-    expect(sendOptions(1).replyToId).toBeUndefined();
+    expect(sendOptions(1).replyToId).toBe("reply-thread");
     expect(sendOptions(1).threadId).toBe("thread-77");
   });
 
@@ -181,8 +193,8 @@ describe("deliverMatrixReplies", () => {
     });
 
     expect(sendMessageMatrixMock).toHaveBeenCalledTimes(1);
-    expect(sendMessageMatrixMock.mock.calls[0]?.[0]).toBe("room:5");
-    expect(sendMessageMatrixMock.mock.calls[0]?.[1]).toBe("Visible answer");
+    expect(sendCall(0)[0]).toBe("room:5");
+    expect(sendCall(0)[1]).toBe("Visible answer");
     expect(sendOptions(0).cfg).toBe(cfg);
   });
 
@@ -219,8 +231,8 @@ describe("deliverMatrixReplies", () => {
       accountId: "ops",
       tableMode: "code",
     });
-    expect(sendMessageMatrixMock.mock.calls[0]?.[0]).toBe("room:4");
-    expect(sendMessageMatrixMock.mock.calls[0]?.[1]).toBe("hello");
+    expect(sendCall(0)[0]).toBe("room:4");
+    expect(sendCall(0)[1]).toBe("hello");
     expect(sendOptions(0).cfg).toBe(explicitCfg);
     expect(sendOptions(0).accountId).toBe("ops");
     expect(sendOptions(0).replyToId).toBe("reply-1");
@@ -239,8 +251,8 @@ describe("deliverMatrixReplies", () => {
       replyToMode: "off",
     });
 
-    expect(sendMessageMatrixMock.mock.calls[0]?.[0]).toBe("room:6");
-    expect(sendMessageMatrixMock.mock.calls[0]?.[1]).toBe("caption");
+    expect(sendCall(0)[0]).toBe("room:6");
+    expect(sendCall(0)[1]).toBe("caption");
     expect(sendOptions(0).mediaUrl).toBe("https://example.com/a.jpg");
   });
 });

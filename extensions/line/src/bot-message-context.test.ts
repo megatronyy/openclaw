@@ -1,10 +1,11 @@
+// Line tests cover bot message context plugin behavior.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { webhook } from "@line/bot-sdk";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { getSessionBindingService } from "openclaw/plugin-sdk/conversation-runtime";
-import { __testing as sessionBindingTesting } from "openclaw/plugin-sdk/conversation-runtime";
+import { testing as sessionBindingTesting } from "openclaw/plugin-sdk/conversation-runtime";
 import {
   createTestRegistry,
   setActivePluginRegistry,
@@ -110,6 +111,30 @@ describe("buildLineMessageContext", () => {
 
     expect(context?.ctxPayload.OriginatingTo).toBe("line:group:group-1");
     expect(context?.ctxPayload.To).toBe("line:group:group-1");
+  });
+
+  it("replaces a failed media placeholder with an unavailable notice", async () => {
+    const event = createMessageEvent({ type: "user", userId: "user-image" }, {
+      message: {
+        id: "image-1",
+        type: "image",
+        contentProvider: { type: "line" },
+      },
+    } as Partial<MessageEvent>);
+
+    const context = await buildLineMessageContext({
+      event,
+      allMedia: [],
+      mediaUnavailable: true,
+      cfg,
+      account,
+      commandAuthorized: true,
+    });
+
+    expect(context?.ctxPayload.RawBody).toBe("<media:image>");
+    expect(context?.ctxPayload.CommandBody).toBe("<media:image>");
+    expect(context?.ctxPayload.BodyForAgent).toBe("[line attachment unavailable]");
+    expect(context?.ctxPayload.MediaPath).toBeUndefined();
   });
 
   it("routes group postback replies to the group id", async () => {
@@ -231,6 +256,32 @@ describe("buildLineMessageContext", () => {
     });
 
     expect(context?.ctxPayload.CommandAuthorized).toBe(false);
+  });
+
+  it("keeps per-channel-peer direct-message last-route writes on the isolated session", async () => {
+    const event = createMessageEvent({ type: "user", userId: "user-1" });
+    const directCfg: OpenClawConfig = {
+      session: { store: storePath, dmScope: "per-channel-peer" },
+    };
+
+    const context = await buildLineMessageContext({
+      event,
+      allMedia: [],
+      cfg: directCfg,
+      account: {
+        ...account,
+        config: { allowFrom: ["user-1"] },
+      },
+      commandAuthorized: true,
+    });
+
+    expect(context?.route.sessionKey).toBe("agent:main:line:direct:user-1");
+    const updateLastRoute = context?.turn.record.updateLastRoute;
+    expect(updateLastRoute?.sessionKey).toBe(context?.route.sessionKey);
+    expect(updateLastRoute?.sessionKey).not.toBe("agent:main:main");
+    expect(updateLastRoute?.channel).toBe("line");
+    expect(updateLastRoute?.to).toBe("user-1");
+    expect(updateLastRoute?.mainDmOwnerPin).toBeUndefined();
   });
 
   it("sets CommandAuthorized on postback context", async () => {

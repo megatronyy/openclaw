@@ -1,9 +1,10 @@
+// Exec policy CLI tests cover execution policy command behavior and persistence.
 import crypto from "node:crypto";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { stripAnsi } from "../../packages/terminal-core/src/ansi.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ExecApprovalsFile, ExecApprovalsSnapshot } from "../infra/exec-approvals.js";
-import { stripAnsi } from "../terminal/ansi.js";
 import { registerExecPolicyCli } from "./exec-policy-cli.js";
 
 function hashApprovalsFile(file: ExecApprovalsFile): string {
@@ -30,8 +31,9 @@ function mockRollbackApprovalSnapshots(originalSnapshot: ExecApprovalsSnapshot) 
 }
 
 function expectFields(value: unknown, expected: Record<string, unknown>): void {
-  expect(value).toBeTypeOf("object");
-  expect(value).not.toBeNull();
+  if (!value || typeof value !== "object") {
+    throw new Error("expected fields object");
+  }
   const record = value as Record<string, unknown>;
   for (const [key, expectedValue] of Object.entries(expected)) {
     expect(record[key], key).toEqual(expectedValue);
@@ -39,10 +41,12 @@ function expectFields(value: unknown, expected: Record<string, unknown>): void {
 }
 
 function readLastJsonWrite(): Record<string, unknown> {
-  const [payload, space] = mocks.defaultRuntime.writeJson.mock.calls.at(-1) ?? [];
+  const calls = mocks.defaultRuntime.writeJson.mock.calls;
+  const [payload, space] = calls[calls.length - 1] ?? [];
   expect(space).toBe(0);
-  expect(payload).toBeTypeOf("object");
-  expect(payload).not.toBeNull();
+  if (!payload || typeof payload !== "object") {
+    throw new Error("expected JSON write payload object");
+  }
   return payload as Record<string, unknown>;
 }
 
@@ -50,9 +54,22 @@ function readFirstPolicyScope(payload: Record<string, unknown>): Record<string, 
   const effectivePolicy = payload.effectivePolicy as { scopes?: unknown[] } | undefined;
   expect(Array.isArray(effectivePolicy?.scopes)).toBe(true);
   const scope = effectivePolicy?.scopes?.[0];
-  expect(scope).toBeTypeOf("object");
-  expect(scope).not.toBeNull();
+  if (!scope || typeof scope !== "object") {
+    throw new Error("expected first policy scope object");
+  }
   return scope as Record<string, unknown>;
+}
+
+function readFirstReplaceConfigArg(): Record<string, unknown> {
+  const call = mocks.replaceConfigFile.mock.calls[0];
+  if (!call) {
+    throw new Error("expected replaceConfigFile call");
+  }
+  const arg = call[0];
+  if (!arg || typeof arg !== "object") {
+    throw new Error("expected replaceConfigFile argument");
+  }
+  return arg as Record<string, unknown>;
 }
 
 const mocks = vi.hoisted(() => {
@@ -106,6 +123,7 @@ const mocks = vi.hoisted(() => {
       return {
         path: "/tmp/openclaw.json",
         previousHash: "hash-1",
+        persistedHash: "hash-1",
         snapshot: { path: "/tmp/openclaw.json" },
         nextConfig: draft,
         result: undefined,
@@ -117,6 +135,7 @@ const mocks = vi.hoisted(() => {
         return {
           path: "/tmp/openclaw.json",
           previousHash: "hash-1",
+          persistedHash: "hash-1",
           snapshot: { path: "/tmp/openclaw.json" },
           nextConfig,
         };
@@ -218,6 +237,7 @@ describe("exec-policy CLI", () => {
         return {
           path: "/tmp/openclaw.json",
           previousHash: "hash-1",
+          persistedHash: "hash-1",
           snapshot: { path: "/tmp/openclaw.json" },
           nextConfig: draft,
           result: undefined,
@@ -231,6 +251,7 @@ describe("exec-policy CLI", () => {
         return {
           path: "/tmp/openclaw.json",
           previousHash: "hash-1",
+          persistedHash: "hash-1",
           snapshot: { path: "/tmp/openclaw.json" },
           nextConfig,
         };
@@ -335,7 +356,7 @@ describe("exec-policy CLI", () => {
       ask: "off",
       askFallback: "full",
     });
-    const [replaceConfigArg] = mocks.replaceConfigFile.mock.calls[0] ?? [];
+    const replaceConfigArg = readFirstReplaceConfigArg();
     expectFields(replaceConfigArg, { baseHash: "config-hash-1" });
     expect(mocks.saveExecApprovals).toHaveBeenCalledTimes(1);
     expect(mocks.replaceConfigFile).toHaveBeenCalledTimes(1);

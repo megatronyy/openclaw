@@ -1,3 +1,10 @@
+/**
+ * Browser agent action route registration and existing-session execution.
+ *
+ * Dispatches normalized actions to either Playwright-backed OpenClaw browser
+ * control or Chrome MCP existing-session operations with navigation guards.
+ */
+import { sleep } from "openclaw/plugin-sdk/runtime-env";
 import { formatErrorMessage } from "../../infra/errors.js";
 import {
   clickChromeMcpElement,
@@ -13,6 +20,7 @@ import {
   type ChromeMcpProfileOptions,
 } from "../chrome-mcp.js";
 import type { BrowserActRequest } from "../client-actions.types.js";
+import { normalizeBrowserEvaluateFunctionSource } from "../evaluate-source.js";
 import {
   assertBrowserNavigationResultAllowed,
   type BrowserNavigationPolicyOptions,
@@ -28,7 +36,7 @@ import {
   jsonActError,
 } from "./agent.act.errors.js";
 import { registerBrowserAgentActHookRoutes } from "./agent.act.hooks.js";
-import { normalizeActRequest, validateBatchTargetIds } from "./agent.act.normalize.js";
+import { canonicalizeActTargetIds, normalizeActRequest } from "./agent.act.normalize.js";
 import { type ActKind, isActKind } from "./agent.act.shared.js";
 import {
   readBody,
@@ -40,12 +48,9 @@ import {
 } from "./agent.shared.js";
 import { resolveTargetIdAfterNavigate } from "./agent.snapshot-target.js";
 import { EXISTING_SESSION_LIMITS } from "./existing-session-limits.js";
+import { readRoutePositiveInteger, readRouteTimerTimeoutMs } from "./route-numeric.js";
 import type { BrowserRouteRegistrar } from "./types.js";
-import { asyncBrowserRoute, jsonError, toNumber, toStringOrEmpty } from "./utils.js";
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+import { asyncBrowserRoute, jsonError, toStringOrEmpty } from "./utils.js";
 
 const EXISTING_SESSION_INTERACTION_NAVIGATION_RECHECK_DELAYS_MS = [0, 250, 500] as const;
 
@@ -175,7 +180,7 @@ async function runExistingSessionActionWithNavigationGuard<T>(params: {
   }
 
   if (actionError) {
-    throw actionError;
+    throw toLintErrorObject(actionError, "Non-Error thrown");
   }
 
   return result as T;
@@ -276,6 +281,12 @@ const SELECTOR_ALLOWED_KINDS: ReadonlySet<string> = new Set([
   "type",
   "wait",
 ]);
+
+function shouldEnforceCurrentUrlForAct(action: BrowserActRequest): boolean {
+  // Batch stays guarded because nested actions can read or return page data.
+  return action.kind !== "resize" && action.kind !== "close";
+}
+
 function getExistingSessionUnsupportedMessage(action: BrowserActRequest): string | null {
   switch (action.kind) {
     case "click":
@@ -341,6 +352,7 @@ function getExistingSessionUnsupportedMessage(action: BrowserActRequest): string
   throw new Error("Unsupported browser act kind");
 }
 
+/** Register browser action endpoints, including hook and download subroutes. */
 export function registerBrowserAgentActRoutes(
   app: BrowserRouteRegistrar,
   ctx: BrowserRouteContext,
@@ -387,6 +399,7 @@ export function registerBrowserAgentActRoutes(
         res,
         ctx,
         targetId,
+        enforceCurrentUrlAllowed: shouldEnforceCurrentUrlForAct(action),
         run: async ({ profileCtx, cdpUrl, tab, resolveTabUrl }) => {
           const evaluateEnabled = ctx.state().resolved.evaluateEnabled;
           const ssrfPolicy = ctx.state().resolved.ssrfPolicy;
@@ -423,13 +436,16 @@ export function registerBrowserAgentActRoutes(
               ...extra,
             });
           };
-          if (action.targetId && action.targetId !== tab.targetId) {
-            return jsonActError(
-              res,
-              403,
-              ACT_ERROR_CODES.targetIdMismatch,
-              "action targetId must match request targetId",
-            );
+          // Nested batch aliases can differ from the request alias, so prefixes
+          // must stay unique across the full tab set before canonicalization.
+          const actionTabs =
+            action.kind === "batch" && !isExistingSession ? await profileCtx.listTabs() : [tab];
+          if (!actionTabs.some((candidate) => candidate.targetId === tab.targetId)) {
+            actionTabs.unshift(tab);
+          }
+          const targetIdError = canonicalizeActTargetIds(action, tab, actionTabs);
+          if (targetIdError) {
+            return jsonActError(res, 403, ACT_ERROR_CODES.targetIdMismatch, targetIdError);
           }
           const profileName = profileCtx.profile.name;
           if (isExistingSession) {
@@ -616,7 +632,10 @@ export function registerBrowserAgentActRoutes(
                       profileName,
                       profile: profileCtx.profile,
                       targetId: tab.targetId,
-                      fn: action.fn,
+                      fn: normalizeBrowserEvaluateFunctionSource(
+                        action.fn,
+                        action.ref ? { argumentName: "el" } : undefined,
+                      ),
                       args: action.ref ? [action.ref] : undefined,
                     }),
                   guard: existingSessionNavigationGuard,
@@ -640,12 +659,6 @@ export function registerBrowserAgentActRoutes(
           if (!pw) {
             return;
           }
-          if (action.kind === "batch") {
-            const targetIdError = validateBatchTargetIds(action.actions, tab.targetId);
-            if (targetIdError) {
-              return jsonActError(res, 403, ACT_ERROR_CODES.targetIdMismatch, targetIdError);
-            }
-          }
           const result = await pw.executeActViaPlaywright({
             cdpUrl,
             action,
@@ -654,21 +667,35 @@ export function registerBrowserAgentActRoutes(
             ssrfPolicy,
             signal: req.signal,
           });
+          if (result.blockedByDialog) {
+            return await jsonOk({
+              blockedByDialog: true,
+              browserState: result.browserState,
+            });
+          }
+          const downloads = result.downloads;
           switch (action.kind) {
             case "batch":
               return await jsonOk(
-                { results: result.results ?? [] },
+                { results: result.results ?? [], ...(downloads ? { downloads } : {}) },
                 { resolveCurrentTarget: true },
               );
             case "evaluate":
-              return await jsonOk({ result: result.result }, { resolveCurrentTarget: true });
+              return await jsonOk(
+                { result: result.result, ...(downloads ? { downloads } : {}) },
+                { resolveCurrentTarget: true },
+              );
             case "click":
             case "clickCoords":
-              return await jsonOk(undefined, { resolveCurrentTarget: true });
+              return await jsonOk(downloads ? { downloads } : undefined, {
+                resolveCurrentTarget: true,
+              });
             case "resize":
-              return await jsonOk();
+              return await jsonOk(downloads ? { downloads } : undefined);
             default:
-              return await jsonOk(undefined, { resolveCurrentTarget: true });
+              return await jsonOk(downloads ? { downloads } : undefined, {
+                resolveCurrentTarget: true,
+              });
           }
         },
       });
@@ -684,8 +711,14 @@ export function registerBrowserAgentActRoutes(
       const body = readBody(req);
       const targetId = resolveTargetIdFromBody(body);
       const url = toStringOrEmpty(body.url);
-      const timeoutMs = toNumber(body.timeoutMs);
-      const maxChars = toNumber(body.maxChars);
+      let timeoutMs: number | undefined;
+      let maxChars: number | undefined;
+      try {
+        timeoutMs = readRouteTimerTimeoutMs(body.timeoutMs);
+        maxChars = readRoutePositiveInteger(body.maxChars, "maxChars");
+      } catch (err) {
+        return jsonError(res, 400, formatErrorMessage(err));
+      }
       if (!url) {
         return jsonError(res, 400, "url is required");
       }
@@ -738,6 +771,7 @@ export function registerBrowserAgentActRoutes(
         res,
         ctx,
         targetId,
+        enforceCurrentUrlAllowed: true,
         run: async ({ profileCtx, cdpUrl, tab, resolveTabUrl }) => {
           const jsonOk = async () => {
             const currentUrl = await resolveTabUrl(tab.url);
@@ -785,4 +819,18 @@ export function registerBrowserAgentActRoutes(
       });
     }),
   );
+}
+
+function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return new Error(value);
+  }
+  const error = new Error(fallbackMessage, { cause: value });
+  if ((typeof value === "object" && value !== null) || typeof value === "function") {
+    Object.assign(error, value);
+  }
+  return error;
 }

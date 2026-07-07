@@ -1,11 +1,14 @@
+// Whatsapp tests cover media plugin behavior.
+import { Readable } from "node:stream";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockNormalizeMessageContent } from "../../../../test/mocks/baileys.js";
 
 type MockMessageInput = Parameters<typeof mockNormalizeMessageContent>[0];
 
-const { normalizeMessageContent, downloadMediaMessage } = vi.hoisted(() => ({
+const { normalizeMessageContent, downloadMediaMessage, saveMediaStream } = vi.hoisted(() => ({
   normalizeMessageContent: vi.fn((msg: MockMessageInput) => mockNormalizeMessageContent(msg)),
   downloadMediaMessage: vi.fn().mockResolvedValue(Buffer.from("fake-media-data")),
+  saveMediaStream: vi.fn(),
 }));
 
 vi.mock("baileys", async () => {
@@ -15,6 +18,10 @@ vi.mock("baileys", async () => {
     downloadMediaMessage,
   };
 });
+
+vi.mock("openclaw/plugin-sdk/media-store", () => ({
+  saveMediaStream,
+}));
 
 let downloadInboundMedia: typeof import("./media.js").downloadInboundMedia;
 
@@ -26,7 +33,12 @@ const mockSock = {
 async function expectMimetype(message: Record<string, unknown>, expected: string) {
   const result = await downloadInboundMedia({ message } as never, mockSock as never);
   expect(result).toEqual({
-    buffer: Buffer.from("fake-media-data"),
+    saved: {
+      id: "saved-media",
+      path: "/tmp/saved-media",
+      size: Buffer.byteLength("fake-media-data"),
+      contentType: expected,
+    },
     mimetype: expected,
     fileName: undefined,
   });
@@ -40,6 +52,25 @@ describe("downloadInboundMedia", () => {
   beforeEach(() => {
     normalizeMessageContent.mockClear();
     downloadMediaMessage.mockClear();
+    downloadMediaMessage.mockImplementation(() => Readable.from([Buffer.from("fake-media-data")]));
+    saveMediaStream.mockClear();
+    saveMediaStream.mockImplementation(
+      async (
+        stream: AsyncIterable<Buffer>,
+        contentType: string | undefined,
+        _subdir: string,
+        maxBytes: number,
+      ) => {
+        let total = 0;
+        for await (const chunk of stream) {
+          total += chunk.byteLength;
+          if (total > maxBytes) {
+            throw new Error("Media exceeds limit");
+          }
+        }
+        return { id: "saved-media", path: "/tmp/saved-media", size: total, contentType };
+      },
+    );
     mockSock.updateMediaMessage.mockClear();
   });
 
@@ -80,9 +111,40 @@ describe("downloadInboundMedia", () => {
     } as never;
     const result = await downloadInboundMedia(msg, mockSock as never);
     expect(result).toEqual({
-      buffer: Buffer.from("fake-media-data"),
+      saved: {
+        id: "saved-media",
+        path: "/tmp/saved-media",
+        size: Buffer.byteLength("fake-media-data"),
+        contentType: "application/pdf",
+      },
       mimetype: "application/pdf",
       fileName: "report.pdf",
     });
+  });
+
+  it("downloads in stream mode and rejects over the configured cap", async () => {
+    downloadMediaMessage.mockImplementationOnce(() =>
+      Readable.from([Buffer.alloc(4), Buffer.alloc(4)]),
+    );
+
+    await expect(
+      downloadInboundMedia(
+        { message: { imageMessage: { mimetype: "image/jpeg" } } } as never,
+        mockSock as never,
+        7,
+      ),
+    ).rejects.toThrow(/Media exceeds/i);
+    expect(downloadMediaMessage.mock.calls[0]?.[1]).toBe("stream");
+  });
+
+  it("propagates transport download failures to the message owner", async () => {
+    downloadMediaMessage.mockRejectedValueOnce(new Error("expired media reference"));
+
+    await expect(
+      downloadInboundMedia(
+        { message: { imageMessage: { mimetype: "image/jpeg" } } } as never,
+        mockSock as never,
+      ),
+    ).rejects.toThrow("expired media reference");
   });
 });
