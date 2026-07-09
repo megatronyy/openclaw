@@ -37,6 +37,7 @@ import {
   renameSessionGroup,
   saveStoredSessionCustomGroups,
 } from "../lib/sessions/custom-groups.ts";
+import { writeSessionDragData } from "../lib/sessions/drag.ts";
 import {
   groupSidebarSessionRows,
   normalizeSidebarSessionsGrouping,
@@ -69,6 +70,7 @@ type SidebarRecentSession = {
   meta: string;
   href: string;
   active: boolean;
+  visuallyActive: boolean;
   hasActiveRun: boolean;
   kind?: string;
   pinned: boolean;
@@ -93,6 +95,10 @@ type SidebarSessionSortMode = "created" | "updated";
 
 const SIDEBAR_SESSION_GROUPING_STORAGE_KEY = "openclaw:sidebar:sessions:grouping";
 
+const PALETTE_SHORTCUT = /Mac|iP(hone|ad|od)/i.test(globalThis.navigator?.platform ?? "")
+  ? "⌘K"
+  : "Ctrl K";
+
 function loadStoredSidebarSessionsGrouping(): SidebarSessionsGrouping {
   return normalizeSidebarSessionsGrouping(
     getSafeLocalStorage()?.getItem(SIDEBAR_SESSION_GROUPING_STORAGE_KEY),
@@ -107,6 +113,14 @@ const SIDEBAR_SESSION_SORT_OPTIONS = [
   labelKey: "chat.sidebar.sortCreated" | "chat.sidebar.sortUpdated";
 }>;
 
+function formatSidebarTimestamp(timestampMs: number | null | undefined): string {
+  const value = formatRelativeTimestamp(timestampMs, { fallback: "" });
+  if (value === "just now") {
+    return "now";
+  }
+  return value.endsWith(" ago") ? value.slice(0, -" ago".length) : value;
+}
+
 function shouldHandleNavigationClick(event: MouseEvent): boolean {
   return (
     !event.defaultPrevented &&
@@ -118,7 +132,7 @@ function shouldHandleNavigationClick(event: MouseEvent): boolean {
   );
 }
 
-export class AppSidebar extends LitElement {
+class AppSidebar extends LitElement {
   override createRenderRoot() {
     return this;
   }
@@ -135,7 +149,8 @@ export class AppSidebar extends LitElement {
     DEFAULT_SIDEBAR_PINNED_ROUTES;
   @property({ attribute: false }) sidebarMoreExpanded = false;
   @property({ attribute: false }) themeMode: ThemeMode = "system";
-  @property({ attribute: false }) onToggleCollapse?: () => void;
+  @property({ attribute: false }) onOpenPalette?: () => void;
+  @property({ attribute: false }) onToggleSidebar?: () => void;
   @property({ attribute: false }) onToggleMore?: () => void;
   @property({ attribute: false }) onUpdatePinnedRoutes?: (routes: SidebarNavRoute[]) => void;
   @property({ attribute: false }) onPairMobile?: () => void;
@@ -149,6 +164,7 @@ export class AppSidebar extends LitElement {
   @state() private sessionMenu: SidebarSessionMenuState | null = null;
   @state() private sessionGroupSubmenuOpen = false;
   @state() private sessionGroupMenu: SidebarSessionGroupMenuState | null = null;
+  @state() private draggingSessionKey: string | null = null;
   @state() private sessionSortMode: SidebarSessionSortMode = "created";
   @state() private sessionsGrouping: SidebarSessionsGrouping = loadStoredSidebarSessionsGrouping();
   @state() private sessionSortMenuPosition: { x: number; y: number } | null = null;
@@ -271,6 +287,38 @@ export class AppSidebar extends LitElement {
     this.gatewayClient = client;
   }
 
+  private renderBrand() {
+    const collapseLabel = this.collapsed ? t("nav.expand") : t("nav.collapse");
+    const collapseTooltip = `${collapseLabel} (⌘B)`;
+    return html`
+      <div class="sidebar-brand">
+        <div class="sidebar-brand__identity">
+          <img
+            class="sidebar-brand__logo"
+            src=${controlUiPublicAssetPath("apple-touch-icon.png", this.basePath)}
+            alt=""
+            aria-hidden="true"
+          />
+          ${this.collapsed ? nothing : html`<span class="sidebar-brand__title">OpenClaw</span>`}
+        </div>
+        <div class="sidebar-brand__actions">
+          ${this.renderSearch()}
+          <openclaw-tooltip .content=${collapseTooltip}>
+            <button
+              class="sidebar-brand__icon"
+              type="button"
+              @click=${() => this.onToggleSidebar?.()}
+              aria-label=${collapseLabel}
+              aria-expanded=${String(!this.collapsed)}
+            >
+              ${this.collapsed ? icons.panelLeftOpen : icons.panelLeftClose}
+            </button>
+          </openclaw-tooltip>
+        </div>
+      </div>
+    `;
+  }
+
   private getRouteSessionKey(): string {
     return this.sessionKey.trim() || this.context?.gateway.snapshot.sessionKey.trim() || "";
   }
@@ -314,12 +362,14 @@ export class AppSidebar extends LitElement {
       hello: context?.gateway.snapshot.hello,
       compareSessions: this.compareSidebarSessionRows,
     });
+    const highlightCurrentSession = this.activeRouteId === "chat";
     const toSidebarSession = (row: SessionsListResult["sessions"][number]) => ({
       key: row.key,
       label: resolveSessionDisplayName(row.key, row),
-      meta: row.updatedAt ? formatRelativeTimestamp(row.updatedAt) : "",
+      meta: formatSidebarTimestamp(row.updatedAt),
       href: `${pathForRoute("chat", context?.basePath ?? "")}${searchForSession(row.key)}`,
       active: row.key === navigation.activeRowKey,
+      visuallyActive: highlightCurrentSession && row.key === navigation.currentSessionKey,
       hasActiveRun: Boolean(row.hasActiveRun),
       kind: row.kind,
       pinned: row.pinned === true,
@@ -564,16 +614,21 @@ export class AppSidebar extends LitElement {
     }
   }
 
-  private openSessionSortMenu(x: number, y: number, trigger: HTMLElement | null = null) {
+  private toggleSessionSortMenu(trigger: HTMLElement) {
+    if (this.sessionSortMenuPosition) {
+      this.closeSessionSortMenu();
+      return;
+    }
     const menuWidth = 200;
     const menuMaxHeight = 280;
+    const rect = trigger.getBoundingClientRect();
     this.closeCustomizeMenu();
     this.closeSessionMenu();
     this.closeSessionGroupMenu();
     this.sessionSortMenuTrigger = trigger;
     this.sessionSortMenuPosition = {
-      x: Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8)),
-      y: Math.max(8, Math.min(y, window.innerHeight - menuMaxHeight - 8)),
+      x: Math.max(8, Math.min(rect.right, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menuMaxHeight - 8)),
     };
     document.addEventListener("pointerdown", this.handleDocumentPointerDown, true);
     document.addEventListener("keydown", this.handleDocumentKeydown, true);
@@ -714,6 +769,9 @@ export class AppSidebar extends LitElement {
 
   private readonly handleDocumentPointerDown = (event: PointerEvent) => {
     const path = event.composedPath();
+    if (this.sessionSortMenuTrigger && path.includes(this.sessionSortMenuTrigger)) {
+      return;
+    }
     const menu = this.querySelector(
       ".sidebar-customize-menu, .sidebar-session-menu, .sidebar-session-sort-menu",
     );
@@ -1204,9 +1262,10 @@ export class AppSidebar extends LitElement {
     const rowClass = [
       "sidebar-recent-session",
       "session-row-host",
-      session.active ? "sidebar-recent-session--active" : "",
+      session.visuallyActive ? "sidebar-recent-session--active" : "",
       session.pinned ? "session-row-host--pinned" : "",
       session.hasActiveRun ? "session-row-host--running" : "",
+      this.draggingSessionKey === session.key ? "sidebar-recent-session--dragging" : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -1214,6 +1273,16 @@ export class AppSidebar extends LitElement {
       <div
         class=${rowClass}
         data-session-key=${session.key}
+        draggable="true"
+        @dragstart=${(event: DragEvent) => {
+          if (event.dataTransfer) {
+            writeSessionDragData(event.dataTransfer, session.key);
+            this.draggingSessionKey = session.key;
+          }
+        }}
+        @dragend=${() => {
+          this.draggingSessionKey = null;
+        }}
         @contextmenu=${(event: MouseEvent) => {
           event.preventDefault();
           this.openSessionMenu(session, event.clientX, event.clientY);
@@ -1224,6 +1293,7 @@ export class AppSidebar extends LitElement {
         <a
           href=${session.href}
           class="sidebar-recent-session__link"
+          draggable="false"
           title=${`${session.label} · ${session.key}`}
           @click=${(event: MouseEvent) => {
             if (!shouldHandleNavigationClick(event)) {
@@ -1434,8 +1504,7 @@ export class AppSidebar extends LitElement {
                           aria-expanded=${String(this.sessionSortMenuPosition !== null)}
                           @click=${(event: MouseEvent) => {
                             const trigger = event.currentTarget as HTMLElement;
-                            const rect = trigger.getBoundingClientRect();
-                            this.openSessionSortMenu(rect.right - 180, rect.bottom + 4, trigger);
+                            this.toggleSessionSortMenu(trigger);
                           }}
                         >
                           ${icons.listFilter}
@@ -1501,6 +1570,24 @@ export class AppSidebar extends LitElement {
         </select>
         <span class="sidebar-agent-scope__chevron" aria-hidden="true">${icons.chevronDown}</span>
       </label>
+    `;
+  }
+
+  /** Command palette entry point; the palette itself is owned by the shell. */
+  private renderSearch() {
+    const tooltip = `${t("chat.openCommandPalette")} (${PALETTE_SHORTCUT})`;
+    return html`
+      <openclaw-tooltip .content=${tooltip}>
+        <button
+          type="button"
+          class="sidebar-brand__icon sidebar-search"
+          ?disabled=${!this.onOpenPalette}
+          aria-label=${t("chat.openCommandPalette")}
+          @click=${() => this.onOpenPalette?.()}
+        >
+          ${icons.search}
+        </button>
+      </openclaw-tooltip>
     `;
   }
 
@@ -1570,14 +1657,8 @@ export class AppSidebar extends LitElement {
       this.activeRouteId !== undefined && isSettingsNavigationRoute(this.activeRouteId);
     return html`
       <aside class="sidebar ${this.collapsed ? "sidebar--collapsed" : ""}">
-        <!-- macOS app only (CSS-gated on html.openclaw-native-macos): use the
-             otherwise-empty native titlebar strip instead of a sidebar row. -->
-        <img
-          class="sidebar-native-brand"
-          src="${controlUiPublicAssetPath("favicon.svg", this.basePath)}"
-          alt="OpenClaw"
-        />
         <div class="sidebar-shell">
+          ${this.renderBrand()}
           <div class="sidebar-shell__body">
             <nav class="sidebar-nav" @contextmenu=${this.openCustomizeMenuFromContext}>
               ${this.collapsed ? this.renderRoute("chat") : nothing}
@@ -1654,17 +1735,6 @@ export class AppSidebar extends LitElement {
               <span class="sidebar-mode-switch">
                 <openclaw-theme-mode-toggle .mode=${this.themeMode}></openclaw-theme-mode-toggle>
               </span>
-              <openclaw-tooltip .content=${this.collapsed ? t("nav.expand") : t("nav.collapse")}>
-                <button
-                  class="sidebar-footer-icon sidebar-collapse-toggle"
-                  type="button"
-                  aria-label=${this.collapsed ? t("nav.expand") : t("nav.collapse")}
-                  aria-expanded=${String(!this.collapsed)}
-                  @click=${() => this.onToggleCollapse?.()}
-                >
-                  ${this.collapsed ? icons.panelLeftOpen : icons.panelLeftClose}
-                </button>
-              </openclaw-tooltip>
             </div>
           </div>
         </div>

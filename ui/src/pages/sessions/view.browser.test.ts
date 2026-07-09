@@ -184,7 +184,7 @@ async function closeFixture(fixture: BrowserFixture): Promise<void> {
   await fixture.browser.close().catch(() => {});
 }
 
-describeBrowserLayout("sessions responsive browser layout", () => {
+describeBrowserLayout.concurrent("sessions responsive browser layout", () => {
   it.each(VIEWPORTS)("keeps the session roster visible at %dx%d", async (width, height) => {
     const fixture = await openFixture(width, height);
     const { page } = fixture;

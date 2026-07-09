@@ -63,6 +63,7 @@ export const hi: TranslationMap = {
     docs: "दस्तावेज़",
     theme: "थीम",
     colorMode: "रंग मोड",
+    colorModeOption: "रंग मोड: {mode}",
     resources: "संसाधन",
     search: "खोजें",
     save: "सहेजें",
@@ -1540,6 +1541,15 @@ export const hi: TranslationMap = {
   chat: {
     disconnected: "Gateway से डिस्कनेक्ट हो गया।",
     archivedSessionDisabled: "संदेश भेजने के लिए इस सत्र को बहाल करें।",
+    taskSuggestions: {
+      eyebrow: "सुझाया गया अगला कार्य",
+      start: "वर्कट्री में शुरू करें",
+      starting: "शुरू हो रहा है…",
+      dismiss: "{title} को खारिज करें",
+      project: "प्रोजेक्ट",
+      instructions: "निर्देश",
+      adminRequired: "इस प्रोजेक्ट से वर्कट्री बनाने के लिए एडमिनिस्ट्रेटर एक्सेस आवश्यक है।",
+    },
     refreshTitle: "चैट डेटा रीफ़्रेश करें",
     settings: "चैट सेटिंग्स",
     usageRemaining: "शेष उपयोग",
@@ -1575,6 +1585,8 @@ export const hi: TranslationMap = {
       splitDown: "नीचे विभाजित करें",
       closePane: "पैन बंद करें",
       sessionSelect: "पैन सत्र",
+      dropSplit: "विभाजित करें",
+      dropOpenHere: "यहाँ खोलें",
     },
     sidebar: {
       allSessions: "सभी सत्र",

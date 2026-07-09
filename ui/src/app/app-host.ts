@@ -2,7 +2,7 @@ import { consume, ContextProvider } from "@lit/context";
 import type { RouteLocation, RouterState } from "@openclaw/uirouter";
 import { html, LitElement, nothing } from "lit";
 import { property, query, state } from "lit/decorators.js";
-import type { GatewayBrowserClient } from "../api/gateway.ts";
+import { hasStoredGatewayAuth, type GatewayBrowserClient } from "../api/gateway.ts";
 import type { AgentsListResult } from "../api/types.ts";
 import "../components/app-sidebar.ts";
 import "../components/app-topbar.ts";
@@ -11,6 +11,7 @@ import "../components/exec-approval.ts";
 import "../components/gateway-url-confirmation.ts";
 import "../components/github-link-hovercard.ts";
 import "../components/login-gate.ts";
+import "../components/resizable-divider.ts";
 import "../components/terminal/terminal-panel.ts";
 import "../components/tooltip.ts";
 import "../components/update-banner.ts";
@@ -39,7 +40,9 @@ import {
 } from "./context.ts";
 import { hasOperatorAdminAccess } from "./operator-access.ts";
 import type { ApplicationOverlaySnapshot } from "./overlays.ts";
+import { controlUiPublicAssetPath } from "./public-assets.ts";
 import { selectRenderedRouteMatch } from "./router-outlet.ts";
+import { NAV_WIDTH_DEFAULT, NAV_WIDTH_MAX, NAV_WIDTH_MIN } from "./settings.ts";
 
 type ShellRouteState = {
   routeId?: RouteId;
@@ -99,6 +102,20 @@ function resolveTerminalThemeMode(): "dark" | "light" {
   return document.documentElement.dataset.themeMode === "light" ? "light" : "dark";
 }
 
+// The mascot SVG animates via SMIL, so it must load through <img src> —
+// inlining the markup would freeze it (see ui/public/favicon.svg).
+function renderConnectingSplash(basePath: string) {
+  return html`
+    <main class="connect-splash" role="status" aria-live="polite" aria-label=${t("common.loading")}>
+      <img
+        class="connect-splash__logo"
+        src=${controlUiPublicAssetPath("favicon.svg", basePath)}
+        alt=""
+      />
+    </main>
+  `;
+}
+
 function isTerminalAvailable(
   snapshot: ApplicationContext["gateway"]["snapshot"],
   terminalEnabled: boolean,
@@ -112,7 +129,11 @@ function isTerminalAvailable(
   );
 }
 
-export class OpenClawApp extends LitElement {
+function isMobileNavLayout(): boolean {
+  return globalThis.matchMedia?.("(max-width: 1100px)").matches ?? false;
+}
+
+class OpenClawApp extends LitElement {
   @state() private gatewayConnected = false;
   @state() private gatewayReconnecting = false;
   @state() private gatewayLastError: string | null = null;
@@ -131,6 +152,10 @@ export class OpenClawApp extends LitElement {
   @state() private terminalClient: GatewayBrowserClient | null = null;
 
   private readonly terminalOnly = isTerminalOnlyView();
+  // Fixed at page load: whether this browser held credentials (token,
+  // password, or stored device token) before the first connect attempt.
+  // Later manual gate submissions are covered by loginGatePinned instead.
+  private initialAuthPresent = false;
   private runtime: ApplicationRuntime | undefined;
   private context: ApplicationContext<RouteId> | undefined;
   private readonly contextProvider = new ContextProvider(this, {
@@ -147,6 +172,7 @@ export class OpenClawApp extends LitElement {
     super.connectedCallback();
     this.runtime = bootstrapApplication();
     this.context = this.runtime.context;
+    this.initialAuthPresent = hasStoredGatewayAuth(this.context.gateway.connection);
     this.pendingGatewayUrl = this.runtime.pendingGatewayConnection?.gatewayUrl ?? null;
     this.contextProvider.setValue(this.context);
     this.syncLoginConnection();
@@ -262,7 +288,24 @@ export class OpenClawApp extends LitElement {
     }
     // Transport drops after an established session keep the shell mounted
     // (offline banner + client auto-retry); the login gate is reserved for
-    // first connects, credential rejections, and manual gate submissions.
+    // credential-less first connects, credential rejections, and manual gate
+    // submissions. A first connect backed by stored credentials paints the
+    // connecting splash instead of flashing the login gate; the gate returns
+    // the moment the attempt fails (lastError set on every close).
+    const initialConnectPending =
+      this.initialAuthPresent &&
+      !this.gatewayConnected &&
+      !this.gatewayReconnecting &&
+      !this.loginGatePinned &&
+      this.gatewayLastError === null &&
+      context.gateway.snapshot.client !== null;
+    if (initialConnectPending) {
+      return html`
+        <openclaw-tooltip-provider>
+          ${renderConnectingSplash(context.basePath)} ${gatewayUrlConfirmation}
+        </openclaw-tooltip-provider>
+      `;
+    }
     const showLoginGate =
       !this.gatewayConnected && (this.loginGatePinned || !this.gatewayReconnecting);
     if (showLoginGate) {
@@ -331,6 +374,7 @@ class OpenClawShell extends LitElement {
   private context?: ApplicationContext<RouteId>;
 
   @state() private navCollapsed = false;
+  @state() private navWidth = NAV_WIDTH_DEFAULT;
   @state() private sidebarPinnedRoutes: readonly SidebarNavRoute[] = [];
   @state() private sidebarMoreExpanded = false;
   @state() private navDrawerOpen = false;
@@ -376,6 +420,8 @@ class OpenClawShell extends LitElement {
     super.connectedCallback();
     this.startSubscriptions();
     this.addEventListener(COMMAND_PALETTE_TARGET_EVENT, this.handleCommandPaletteTarget);
+    document.addEventListener("keydown", this.handleDocumentKeydown);
+    window.addEventListener("resize", this.handleWindowResize);
   }
 
   override updated() {
@@ -443,6 +489,8 @@ class OpenClawShell extends LitElement {
 
   override disconnectedCallback() {
     this.removeEventListener(COMMAND_PALETTE_TARGET_EVENT, this.handleCommandPaletteTarget);
+    document.removeEventListener("keydown", this.handleDocumentKeydown);
+    window.removeEventListener("resize", this.handleWindowResize);
     this.stopAgentsSubscription?.();
     this.stopAgentsSubscription = undefined;
     this.stopConfigSubscription?.();
@@ -496,13 +544,27 @@ class OpenClawShell extends LitElement {
     this.context?.replace("chat", this.chatNavigationOptions());
   }
 
-  private toggleNavDrawer(trigger: HTMLElement) {
-    if (this.navDrawerOpen) {
-      this.closeNavDrawer({ restoreFocus: true });
+  private toggleNavigationSurface(trigger?: HTMLElement) {
+    const context = this.context;
+    if (!context || this.onboarding) {
       return;
     }
-    this.navDrawerTrigger = trigger;
-    this.navDrawerOpen = true;
+    if (isMobileNavLayout()) {
+      if (this.navDrawerOpen) {
+        this.closeNavDrawer({ restoreFocus: Boolean(trigger) });
+        return;
+      }
+      this.navDrawerTrigger = trigger ?? null;
+      this.navDrawerOpen = true;
+      return;
+    }
+    // A drawer that survived a breakpoint change is visually expanded even
+    // when the persisted desktop preference says collapsed.
+    const nextNavCollapsed = this.navDrawerOpen || !this.navCollapsed;
+    this.closeNavDrawer();
+    context.navigation.update({
+      navCollapsed: nextNavCollapsed,
+    });
   }
 
   private closeNavDrawer(options: { restoreFocus?: boolean } = {}) {
@@ -519,12 +581,43 @@ class OpenClawShell extends LitElement {
     });
   }
 
+  private resizeNavigation(splitRatio: number) {
+    const shell = this.querySelector<HTMLElement>(".shell");
+    const context = this.context;
+    if (!shell || !context) {
+      return;
+    }
+    const navWidth = Math.round(
+      Math.min(NAV_WIDTH_MAX, Math.max(NAV_WIDTH_MIN, splitRatio * shell.clientWidth)),
+    );
+    context.navigation.update({ navWidth });
+  }
+
+  private readonly handleWindowResize = () => {
+    this.requestUpdate();
+  };
+
   private readonly handleShellKeydown = (event: KeyboardEvent) => {
     if (event.defaultPrevented || event.key !== "Escape" || !this.navDrawerOpen) {
       return;
     }
     event.preventDefault();
     this.closeNavDrawer({ restoreFocus: true });
+  };
+
+  private readonly handleDocumentKeydown = (event: KeyboardEvent) => {
+    if (
+      event.defaultPrevented ||
+      event.altKey ||
+      event.shiftKey ||
+      !event.metaKey ||
+      event.ctrlKey ||
+      event.key.toLowerCase() !== "b"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    this.toggleNavigationSurface();
   };
 
   private readonly openPalette = () => {
@@ -624,7 +717,19 @@ class OpenClawShell extends LitElement {
     this.sessionKeyClient = snapshot.client;
     if (sessionKey) {
       this.activeSessionKey = sessionKey;
+      this.updateAgentLabel();
     }
+  }
+
+  private updateAgentLabel() {
+    const context = this.context;
+    if (!context) {
+      return;
+    }
+    this.agentLabel = resolveAgentLabel(
+      this.activeSessionKey || context.gateway.snapshot.sessionKey,
+      context.agents.state.agentsList,
+    );
   }
 
   private updateRouteState(routeState: ShellRouteState) {
@@ -643,21 +748,11 @@ class OpenClawShell extends LitElement {
     }
   }
 
-  private updateAgentLabel() {
-    const context = this.context;
-    if (!context) {
-      return;
-    }
-    this.agentLabel = resolveAgentLabel(
-      this.activeSessionKey || context.gateway.snapshot.sessionKey,
-      context.agents.state.agentsList,
-    );
-  }
-
   private readonly updateNavigationPreferences = (
     snapshot: ApplicationRuntime["context"]["navigation"]["snapshot"],
   ) => {
     this.navCollapsed = snapshot.navCollapsed;
+    this.navWidth = snapshot.navWidth;
     this.sidebarPinnedRoutes = snapshot.sidebarPinnedRoutes;
     this.sidebarMoreExpanded = snapshot.sidebarMoreExpanded;
   };
@@ -678,6 +773,7 @@ class OpenClawShell extends LitElement {
     // Drawer navigation always opens expanded; the desktop collapse preference
     // stays persisted for when the viewport returns to the desktop layout.
     const navCollapsed = this.navCollapsed && !navDrawerOpen;
+    const shellWidth = Math.max(globalThis.innerWidth || 0, NAV_WIDTH_MAX);
     return html`
       <openclaw-command-palette
         .onNavigate=${(routeId: RouteId) => this.navigate(routeId)}
@@ -693,6 +789,7 @@ class OpenClawShell extends LitElement {
           : ""} ${navDrawerOpen ? "shell--nav-drawer-open" : ""} ${this.onboarding
           ? "shell--onboarding"
           : ""}"
+        style=${`--shell-nav-expanded-width: ${this.navWidth}px`}
         @keydown=${this.handleShellKeydown}
         @theme-change=${this.handleThemeChange}
       >
@@ -709,13 +806,9 @@ class OpenClawShell extends LitElement {
           .overviewHref=${pathForRoute("overview", context.basePath)}
           .searchDisabled=${false}
           .navDrawerOpen=${navDrawerOpen}
-          .themeMode=${context.theme.mode}
           .onboarding=${this.onboarding}
           .onOpenPalette=${this.openPalette}
-          .terminalAvailable=${this.terminalAvailable}
-          .onToggleTerminal=${() =>
-            window.dispatchEvent(new CustomEvent("openclaw:terminal-toggle"))}
-          .onToggleDrawer=${(trigger: HTMLElement) => this.toggleNavDrawer(trigger)}
+          .onToggleDrawer=${(trigger: HTMLElement) => this.toggleNavigationSurface(trigger)}
           .onNavigate=${(routeId: string, options?: ApplicationNavigationOptions) =>
             this.navigate(routeId, options)}
         ></openclaw-app-topbar>
@@ -733,10 +826,8 @@ class OpenClawShell extends LitElement {
             .sidebarPinnedRoutes=${this.sidebarPinnedRoutes}
             .sidebarMoreExpanded=${this.sidebarMoreExpanded}
             .themeMode=${context.theme.mode}
-            .onToggleCollapse=${() =>
-              context.navigation.update({
-                navCollapsed: !navCollapsed,
-              })}
+            .onOpenPalette=${this.openPalette}
+            .onToggleSidebar=${() => this.toggleNavigationSurface()}
             .onToggleMore=${() =>
               context.navigation.update({
                 sidebarMoreExpanded: !context.navigation.snapshot.sidebarMoreExpanded,
@@ -750,6 +841,21 @@ class OpenClawShell extends LitElement {
               isRouteId(routeId) ? context.preload(routeId) : Promise.resolve()}
           ></openclaw-app-sidebar>
         </div>
+        ${!navCollapsed && !this.onboarding
+          ? html`
+              <resizable-divider
+                class="sidebar-resizer"
+                .label=${t("nav.resize")}
+                .splitRatio=${this.navWidth / shellWidth}
+                .minRatio=${NAV_WIDTH_MIN / shellWidth}
+                .maxRatio=${NAV_WIDTH_MAX / shellWidth}
+                aria-valuetext=${`${this.navWidth} pixels`}
+                title=${t("nav.resize")}
+                @resize=${(event: CustomEvent<{ splitRatio: number }>) =>
+                  this.resizeNavigation(event.detail.splitRatio)}
+              ></resizable-divider>
+            `
+          : nothing}
         <main
           class="content ${activeRoute === "chat" ? "content--chat" : ""} ${activeRoute ===
           "workboard"
